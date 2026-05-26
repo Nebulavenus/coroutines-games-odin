@@ -33,15 +33,17 @@ Node_Exec_Info :: struct {
 }
 
 Executor :: struct {
-	active_nodes:    [dynamic]Node_Exec_Info,
-	suspended_nodes: [dynamic]Node_Exec_Info,
-	step_count:      int,
-	allocator:       mem.Allocator,
+	active_nodes:      [dynamic]Node_Exec_Info,
+	next_active_nodes: [dynamic]Node_Exec_Info,
+	suspended_nodes:   [dynamic]Node_Exec_Info,
+	step_count:        int,
+	allocator:         mem.Allocator,
 }
 
 executor_init :: proc(exec: ^Executor, allocator := context.allocator) {
 	exec.allocator = allocator
 	exec.active_nodes = make([dynamic]Node_Exec_Info, allocator)
+	exec.next_active_nodes = make([dynamic]Node_Exec_Info, allocator)
 	exec.suspended_nodes = make([dynamic]Node_Exec_Info, allocator)
 	exec.step_count = 0
 }
@@ -52,12 +54,18 @@ executor_destroy :: proc(exec: ^Executor) {
 			destroy_node(info.node, exec.allocator)
 		}
 	}
+	for info in exec.next_active_nodes {
+		if info.parent == nil && info.node != nil {
+			destroy_node(info.node, exec.allocator)
+		}
+	}
 	for info in exec.suspended_nodes {
 		if info.parent == nil && info.node != nil {
 			destroy_node(info.node, exec.allocator)
 		}
 	}
 	delete(exec.active_nodes)
+	delete(exec.next_active_nodes)
 	delete(exec.suspended_nodes)
 }
 
@@ -75,16 +83,24 @@ enqueue_node :: proc(exec: ^Executor, node: ^Node, parent: ^Node = nil) {
 executor_step :: proc(exec: ^Executor, dt: f32) {
 	for i := len(exec.suspended_nodes) - 1; i >= 0; i -= 1 {
 		if exec.suspended_nodes[i].status == .Aborted {
+			if exec.suspended_nodes[i].parent == nil {
+				destroy_node(exec.suspended_nodes[i].node, exec.allocator)
+			}
 			unordered_remove(&exec.suspended_nodes, i)
 		}
 	}
 
-	initial_active_count := len(exec.active_nodes)
-	for i := 0; i < initial_active_count; i += 1 {
-		if len(exec.active_nodes) == 0 do break
+	i := 0
+	for i < len(exec.active_nodes) {
+		info := exec.active_nodes[i]
+		i += 1
 
-		info := pop(&exec.active_nodes)
-		if info.status == .Aborted do continue
+		if info.status == .Aborted {
+			if info.parent == nil {
+				destroy_node(info.node, exec.allocator)
+			}
+			continue
+		}
 
 		if info.status == .None {
 			info.status = info.node.start(info.node, exec)
@@ -100,41 +116,71 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 			}
 		}
 
-		info.status = info.node.update(info.node, exec, dt)
-		info.node.status = info.status
+		if info.status == .Running {
+			info.status = info.node.update(info.node, exec, dt)
+			info.node.status = info.status
 
-		if info.status == .Suspended {
-			append(&exec.suspended_nodes, info)
-			continue
+			if info.status == .Suspended {
+				append(&exec.suspended_nodes, info)
+				continue
+			}
+			if info.status == .Completed || info.status == .Failed {
+				process_node_end(exec, &info, info.status)
+				continue
+			}
+
+			append(&exec.next_active_nodes, info)
 		}
+
 		if info.status == .Completed || info.status == .Failed {
 			process_node_end(exec, &info, info.status)
 			continue
 		}
-
-		inject_at(&exec.active_nodes, 0, info)
 	}
+
+	clear(&exec.active_nodes)
+	for info in exec.next_active_nodes {
+		append(&exec.active_nodes, info)
+	}
+	clear(&exec.next_active_nodes)
 	exec.step_count += 1
 }
 
 process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status) {
 	info.node.end(info.node, exec, status)
+	info.node.status = status
 
 	if info.parent != nil {
 		parent_status := info.parent.on_child_stopped(info.parent, exec, status, info.node)
-		if parent_status != .Suspended {
-			for &active_info in exec.active_nodes {
-				if active_info.node == info.parent {
-					active_info.status = parent_status
+
+		for j := 0; j < len(exec.active_nodes); j += 1 {
+			if exec.active_nodes[j].node == info.parent {
+				exec.active_nodes[j].status = parent_status
+			}
+		}
+
+		for j := len(exec.next_active_nodes) - 1; j >= 0; j -= 1 {
+			if exec.next_active_nodes[j].node == info.parent {
+				if parent_status != .Running {
+					p := exec.next_active_nodes[j]
+					p.status = parent_status
+					append(&exec.active_nodes, p)
+					unordered_remove(&exec.next_active_nodes, j)
+				} else {
+					exec.next_active_nodes[j].status = parent_status
 				}
 			}
-			for &suspended_info in exec.suspended_nodes {
-				if suspended_info.node == info.parent {
-					suspended_info.status = parent_status
-					if parent_status != .Suspended {
-						append(&exec.active_nodes, suspended_info)
-						suspended_info.status = .Aborted
-					}
+		}
+
+		for j := len(exec.suspended_nodes) - 1; j >= 0; j -= 1 {
+			if exec.suspended_nodes[j].node == info.parent {
+				if parent_status != .Suspended {
+					p := exec.suspended_nodes[j]
+					p.status = parent_status
+					append(&exec.active_nodes, p)
+					unordered_remove(&exec.suspended_nodes, j)
+				} else {
+					exec.suspended_nodes[j].status = parent_status
 				}
 			}
 		}
@@ -149,6 +195,11 @@ abort_node :: proc(exec: ^Executor, node: ^Node) {
 	node.status = .Aborted
 
 	for &info in exec.active_nodes {
+		if info.node == node {
+			info.status = .Aborted
+		}
+	}
+	for &info in exec.next_active_nodes {
 		if info.node == node {
 			info.status = .Aborted
 		}
@@ -284,9 +335,11 @@ loop_vtable := Node_VTable {
 		return .Running
 	},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {
-		l := (^Loop_Node)(
-			self,
-		); if status == .Aborted && (l.child.status == .Running || l.child.status == .Suspended) {
+		l := (^Loop_Node)(self)
+		if status == .Aborted &&
+		   (l.child.status == .None ||
+				   l.child.status == .Running ||
+				   l.child.status == .Suspended) {
 			abort_node(exec, l.child)
 		}
 	},
@@ -314,14 +367,15 @@ race_vtable := Node_VTable {
 		r := (^Race_Node)(self)
 		if status == .Aborted {
 			for c in r.children {
-				if c.status == .Running || c.status == .Suspended do abort_node(exec, c)
+				if c.status == .None || c.status == .Running || c.status == .Suspended do abort_node(exec, c)
 			}
 		}
 	},
 	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
 		r := (^Race_Node)(self)
 		for other in r.children {
-			if other != child && (other.status == .Running || other.status == .Suspended) {
+			if other != child &&
+			   (other.status == .None || other.status == .Running || other.status == .Suspended) {
 				abort_node(exec, other)
 			}
 		}
@@ -352,7 +406,7 @@ sync_vtable := Node_VTable {
 		s := (^Sync_Node)(self)
 		if status == .Aborted {
 			for c in s.children {
-				if c.status == .Running || c.status == .Suspended do abort_node(exec, c)
+				if c.status == .None || c.status == .Running || c.status == .Suspended do abort_node(exec, c)
 			}
 		}
 	},
@@ -594,3 +648,4 @@ catch :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 	node := new(Catch_Node, allocator); node.base = &catch_vtable; node.child = child
 	node.name = "Catch"; return node
 }
+
