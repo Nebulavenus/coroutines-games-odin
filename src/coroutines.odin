@@ -628,6 +628,16 @@ wait_until :: proc(
 	return node
 }
 
+check :: proc(
+	condition: proc(_: rawptr) -> bool,
+	payload: rawptr = nil,
+	allocator := context.allocator,
+) -> ^Node {
+	node := new(Callback_Node, allocator); node.base = &callback_vtable
+	node.callback = condition; node.payload = payload; node.name = "Check"
+	return node
+}
+
 scope :: proc(
 	child: ^Node,
 	on_exit: proc(_: rawptr, _: Status),

@@ -316,7 +316,7 @@ test_nested_aborts :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_deep_nesting :: proc(t: ^testing.T) {
+test_wait_until_with_zero_dt :: proc(t: ^testing.T) {
 	exec: Executor
 	executor_init(&exec)
 	defer executor_destroy(&exec)
@@ -324,16 +324,25 @@ test_deep_nesting :: proc(t: ^testing.T) {
 	ctx: Test_Context
 	reset_context(&ctx)
 
-	// Deeply nested sequence
-	node := seq(seq(seq(seq(run(complete_action, &ctx)))))
+	condition := false
+	check_cond :: proc(data: rawptr) -> bool {
+		return (^bool)(data)^
+	}
+
+	node := seq(wait_until(check_cond, &condition), run(complete_action, &ctx))
 	enqueue_node(&exec, node)
 
+	// Step with zero dt (paused simulation)
+	executor_step(&exec, 0.0)
+	testing.expect_value(t, ctx.was_completed, false)
+
+	condition = true
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, ctx.was_completed, true)
 }
 
 @(test)
-test_manual_enqueue_during_step :: proc(t: ^testing.T) {
+test_select_blocking_on_running :: proc(t: ^testing.T) {
 	exec: Executor
 	executor_init(&exec)
 	defer executor_destroy(&exec)
@@ -341,25 +350,19 @@ test_manual_enqueue_during_step :: proc(t: ^testing.T) {
 	ctx: Test_Context
 	reset_context(&ctx)
 
-	// Action that enqueues another action when run
-	enqueue_action :: proc(data: rawptr) -> bool {
-		payload := (^struct {
-				exec: ^Executor,
-				ctx:  ^Test_Context,
-			})(data)
-		enqueue_node(payload.exec, run(complete_action, payload.ctx))
-		return true
+	condition := false
+	check_cond :: proc(data: rawptr) -> bool {
+		return (^bool)(data)^
 	}
 
-	payload := struct {
-		exec: ^Executor,
-		ctx:  ^Test_Context,
-	}{&exec, &ctx}
-
-	enqueue_node(&exec, run(enqueue_action, &payload))
+	// First branch blocks on wait_until. Select should NOT fallback while branch is Running.
+	node := select(seq(wait_until(check_cond, &condition), run(increment_action, &ctx)), run(increment_action, &ctx))
+	enqueue_node(&exec, node)
 
 	executor_step(&exec, 0.0)
-	// The enqueued action should have run in the same frame
-	testing.expect_value(t, ctx.was_completed, true)
-}
+	testing.expect_value(t, ctx.action_count, 0)
 
+	condition = true
+	executor_step(&exec, 0.0)
+	testing.expect_value(t, ctx.action_count, 1)
+}
