@@ -66,13 +66,13 @@ main :: proc() {
 	state := Game_State { score = 42 }
 
 	// Sequence coroutine: Print -> wait 1.5s -> print -> wait 3.0s -> print
-	my_coroutine := new_sequence_node([]^Node {
-		new_callback_node(print_score_callback, &state),
-		new_wait_node(1.5),
-		new_callback_node(print_score_callback, &state),
-		new_wait_node(3.0),
-		new_callback_node(print_score_callback, &state),
-	})
+	my_coroutine := seq(
+		run(print_score_callback, &state),
+		wait(1.5),
+		run(print_score_callback, &state),
+		wait(3.0),
+		run(print_score_callback, &state),
+	)
 	enqueue_node(&exec, my_coroutine)
 
 	// Game loop

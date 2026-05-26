@@ -268,6 +268,195 @@ new_sequence_node :: proc(children: []^Node) -> ^Node {
 	return node
 }
 
+Race_Node :: struct {
+	using node: Node,
+	children: [dynamic]^Node,
+}
+
+race_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		race := (^Race_Node)(self)
+		if len(race.children) == 0 do return .Completed
+		// start all children in parallel
+		for child in race.children {
+			enqueue_node(exec, child, race)
+		}
+		return .Suspended
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
+		return .Suspended
+	},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {
+		race := (^Race_Node)(self)
+		if status == .Aborted {
+			for child in race.children {
+				if child.status == .Running || child.status == .Suspended {
+					abort_node(exec, child)
+				}
+			}
+		}
+	},
+	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
+		race := (^Race_Node)(self)
+		// abort all other children that are still active, because this child already finished
+		for other in race.children {
+			if other != child && (other.status == .Running) || other.status == .Suspended {
+				abort_node(exec, other)
+			}
+		}
+		return status
+	},
+	destroy = proc(self: ^Node) {
+		race := (^Race_Node)(self)
+		for child in race.children {
+			destroy_node(child)
+		}
+		delete(race.children)
+		free(race)
+	},
+}
+
+new_race_node :: proc(children: []^Node) -> ^Node {
+	node := new(Race_Node)
+	node.base = &race_vtable
+	node.children = make([dynamic]^Node)
+	for child in children {
+		append(&node.children, child)
+	}
+	node.name = "Race"
+	return node
+}
+
+Loop_Node :: struct {
+	using node: Node,
+	child: ^Node,
+	last_step: int,
+}
+
+loop_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		loop := (^Loop_Node)(self)
+		loop.last_step = -1
+		return .Running
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
+		loop := (^Loop_Node)(self)
+		if exec.step_count != loop.last_step {
+			loop.last_step = exec.step_count
+			if loop.child.status != .Running && loop.child.status != .Suspended {
+				enqueue_node(exec, loop.child, loop)
+			}
+		}
+		return .Running
+	},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {
+		loop := (^Loop_Node)(self)
+		if status == .Aborted && (loop.child.status == .Running || loop.child.status == .Suspended) {
+			abort_node(exec, loop.child)
+		}
+	},
+	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
+		if status == .Failed {
+			return .Completed // break loop on failure
+		}
+		return .Running
+	},
+	destroy = proc(self: ^Node) {
+		loop := (^Loop_Node)(self)
+		destroy_node(loop.child)
+		free(loop)
+	},
+}
+
+new_loop_node :: proc(child: ^Node) -> ^Node {
+	node := new(Loop_Node)
+	node.base = &loop_vtable
+	node.child = child
+	node.name = "Loop"
+	return node
+}
+
+// _WaitFor - events/signaling between parallel branches, one can pause execution until another triggers an event
+
+Event :: struct {
+	listeners: [dynamic]^Listener_Node,
+}
+
+Listener_Node :: struct {
+	using node: Node,
+	event: ^Event,
+	exec: ^Executor,
+}
+
+event_init :: proc(event: ^Event) {
+	event.listeners = make([dynamic]^Listener_Node)
+}
+
+event_destroy :: proc(event: ^Event) {
+	delete(event.listeners)
+}
+
+event_broadcast :: proc(event: ^Event) {
+	// signal all listeners
+	for i := len(event.listeners) - 1; i >= 0; i -= 1 {
+		listener := event.listeners[i]
+		if listener.exec != nil {
+			force_node_end(listener.exec, listener, .Completed)
+		}
+	}
+	clear(&event.listeners)
+}
+
+listener_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		listener := (^Listener_Node)(self)
+		listener.exec = exec
+		append(&listener.event.listeners, listener)
+		return .Suspended
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
+		return .Suspended
+	},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {
+		listener := (^Listener_Node)(self)
+		if status == .Aborted {
+			for i := 0; i < len(listener.event.listeners); i += 1 {
+				if listener.event.listeners[i] == listener {
+					unordered_remove(&listener.event.listeners, i)
+					break
+				}
+			}
+		}
+		listener.exec = nil
+	},
+	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
+		return .Failed
+	},
+	destroy = proc(self: ^Node) {
+		free(self)
+	},
+}
+
+new_wait_for_event_node :: proc(event: ^Event) -> ^Node {
+	node := new(Listener_Node)
+	node.base = &listener_vtable
+	node.event = event
+	node.name = "WaitForEvent"
+	return node
+}
+
+force_node_end :: proc(exec: ^Executor, node: ^Node, status: Status) {
+	for &info in exec.suspended_nodes {
+		if info.node == node {
+			info.status = status
+			// wake up, move back to active queue
+			append(&exec.active_nodes, info)
+			info.status = .Aborted // lazy deletion
+			break
+		}
+	}
+}
+
 Callback_Proc :: proc(data: rawptr) -> bool
 
 Callback_Node :: struct {
@@ -300,5 +489,60 @@ new_callback_node :: proc(callback: Callback_Proc, payload: rawptr = nil) -> ^No
 	node.callback = callback
 	node.payload = payload
 	node.name = "Callback"
+	return node
+}
+
+// Helpers
+
+seq :: proc(nodes: ..^Node) -> ^Node {
+	children_slice := make([]^Node, len(nodes))
+	copy(children_slice, nodes)
+	return new_sequence_node(children_slice)
+}
+
+race :: proc(nodes: ..^Node) -> ^Node {
+	children_slice := make([]^Node, len(nodes))
+	copy(children_slice, nodes)
+	return new_race_node(children_slice)
+}
+
+wait :: proc(duration: f32) -> ^Node {
+	return new_wait_node(duration)
+}
+
+run :: proc(callback: Callback_Proc, payload: rawptr = nil) -> ^Node {
+	return new_callback_node(callback, payload)
+}
+
+loop :: proc(child: ^Node) -> ^Node {
+	return new_loop_node(child)
+}
+
+wait_until :: proc(condition: proc(data: rawptr) -> bool, payload: rawptr = nil) -> ^Node {
+	Condition_Node :: struct {
+		using node: Node,
+		condition: proc(rawptr) -> bool,
+		payload: rawptr,
+	}
+
+	vt := new(Node_VTable)
+	vt^ = Node_VTable {
+		start = proc(self: ^Node, exec: ^Executor) -> Status { return .Running },
+		update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
+			node := (^Condition_Node)(self)
+			return node.condition(node.payload) ? .Completed : .Running
+		},
+		end = proc(self: ^Node, exec: ^Executor, status: Status) {},
+		on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status { return .Failed },
+		destroy = proc(self: ^Node) {
+			free(self.base)
+			free(self)
+		}
+	}
+
+	node := new(Condition_Node)
+	node.condition = condition
+	node.payload = payload
+	node.name = "WaitUntil"
 	return node
 }
