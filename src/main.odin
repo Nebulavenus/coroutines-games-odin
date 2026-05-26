@@ -4,13 +4,13 @@ import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:log"
+import "core:math"
+import "core:math/linalg"
+import "core:math/rand"
 import "core:mem"
 import "core:strings"
 import rl "vendor:raylib"
 import img "vendor:stb/image"
-import "core:math"
-import "core:math/rand"
-import "core:math/linalg"
 
 // --- Windows High Performance GPU Hint ---
 @(export, link_name = "NvOptimusEnablement")
@@ -21,44 +21,44 @@ AmdPowerXpressRequestingHighPerformance: i32 = 1
 W_WIDTH, W_HEIGHT :: 640, 480
 
 Player :: struct {
-	pos: [2]f32,
-	health: int,
-	max_health: int,
-	xp: int,
-	xp_needed: int,
-	level: int,
-	weapons: [dynamic]^Weapon,
+	pos:              [2]f32,
+	health:           int,
+	max_health:       int,
+	xp:               int,
+	xp_needed:        int,
+	level:            int,
+	weapons:          [dynamic]^Weapon,
 	whip_flash_timer: f32,
 }
 
 Enemy :: struct {
-	pos: [2]f32,
-	health: int,
-	speed: f32,
+	pos:     [2]f32,
+	health:  int,
+	speed:   f32,
 	is_boss: bool,
 }
 
 Weapon :: struct {
-	name: string,
-	damage: int,
+	name:     string,
+	damage:   int,
 	cooldown: f32,
 	behavior: ^Node, // auto-firing loop
 }
 
 Projectile :: struct {
-	pos: [2]f32,
-	dir: [2]f32,
+	pos:   [2]f32,
+	dir:   [2]f32,
 	speed: f32,
 }
 
 Game_World :: struct {
-	player: Player,
-	enemies: [dynamic]Enemy,
-	gems: [dynamic][2]f32,
-	projectiles: [dynamic]Projectile,
-	spawner_coro: ^Node, // spawning loop
-	exec: Executor,
-	is_paused: bool,
+	player:              Player,
+	enemies:             [dynamic]Enemy,
+	gems:                [dynamic][2]f32,
+	projectiles:         [dynamic]Projectile,
+	spawner_coro:        ^Node, // spawning loop
+	exec:                Executor,
+	is_paused:           bool,
 	player_damage_timer: f32,
 }
 
@@ -66,62 +66,65 @@ Game_World :: struct {
 whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 	return loop(
 		seq(
-			// delay between attacks
-			wait(weapon.cooldown),
+			wait(weapon.cooldown), // delay between attacks
 
 			// animation and damage
-			run(proc(data: rawptr) -> bool {
-				gw := (^Game_World)(data)
+			run(
+				proc(data: rawptr) -> bool {
+					gw := (^Game_World)(data)
 
-				for &enemy in gw.enemies {
-					dist := linalg.distance(enemy.pos, gw.player.pos)
-					if dist < 120.0 {
-						enemy.health -= 15
+					for &enemy in gw.enemies {
+						dist := linalg.distance(enemy.pos, gw.player.pos)
+						if dist < 120.0 {
+							enemy.health -= 15
+						}
 					}
-				}
-				gw.player.whip_flash_timer = 0.15 // flash duration
-				return true
-			}, game),
+					gw.player.whip_flash_timer = 0.15 // flash duration
+					return true
+				},
+				game,
+			),
+		),
 	)
-)
 }
 
 // every few seconds fires firebal to nearest enemy
 fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 	return loop(
 		seq(
-			// delay between attacks
-			wait(weapon.cooldown),
+			wait(weapon.cooldown), // delay between attacks
 
 			// animation and damage
-			run(proc(data: rawptr) -> bool {
-				gw := (^Game_World)(data)
-				if len(gw.enemies) == 0 do return true
+			run(
+				proc(data: rawptr) -> bool {
+					gw := (^Game_World)(data)
+					if len(gw.enemies) == 0 do return true
 
-				// find nearest enemy
-				nearest_index := 0
-				min_dist := f32(99999.0)
-				for enemy, i in gw.enemies {
-					dist := linalg.distance(enemy.pos, gw.player.pos)
-					if dist < min_dist {
-						min_dist = dist
-						nearest_index = i
+					// find nearest enemy
+					nearest_index := 0
+					min_dist := f32(99999.0)
+					for enemy, i in gw.enemies {
+						dist := linalg.distance(enemy.pos, gw.player.pos)
+						if dist < min_dist {
+							min_dist = dist
+							nearest_index = i
+						}
 					}
-				}
 
-				dir := gw.enemies[nearest_index].pos - gw.player.pos
-				if linalg.length(dir) > 0 {
-					dir = linalg.normalize(dir)
-					append(&gw.projectiles, Projectile {
-						pos = gw.player.pos,
-						dir = dir,
-						speed = 280.0,
-					})
-			}
-			return true
-		}, game),
-)
-)
+					dir := gw.enemies[nearest_index].pos - gw.player.pos
+					if linalg.length(dir) > 0 {
+						dir = linalg.normalize(dir)
+						append(
+							&gw.projectiles,
+							Projectile{pos = gw.player.pos, dir = dir, speed = 280.0},
+						)
+					}
+					return true
+				},
+				game,
+			),
+		),
+	)
 }
 
 // progression with intervals spawning
@@ -129,40 +132,29 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 
 	spawn_skeleton_wave :: proc(data: rawptr) -> bool {
 		gw := (^Game_World)(data)
-		for i in 0..<5 {
+		for i in 0 ..< 5 {
 			angle := rand.float32_range(0, 2 * math.PI)
 			offset := [2]f32{math.cos(angle), math.sin(angle)} * 220.0
-			append(&gw.enemies, Enemy {
-				pos = gw.player.pos + offset,
-				health = 20,
-				speed = 70.0,
-				is_boss = false,
-			})
+			append(
+				&gw.enemies,
+				Enemy{pos = gw.player.pos + offset, health = 20, speed = 70.0, is_boss = false},
+			)
 		}
 		return true
 	}
 
 	spawn_boss :: proc(data: rawptr) -> bool {
 		gw := (^Game_World)(data)
-		append(&gw.enemies, Enemy {
-			pos = gw.player.pos + {0, -200},
-			health = 250,
-			speed = 50.0,
-			is_boss = true
-		})
+		append(
+			&gw.enemies,
+			Enemy{pos = gw.player.pos + {0, -200}, health = 250, speed = 50.0, is_boss = true},
+		)
 		return true
 	}
 
 	return seq(
-		// wave 1
-		// basic skeletons every 3 seconds
-		race(
-			loop(
-				seq(
-					run(spawn_skeleton_wave, game),
-					wait(3.0),
-				)
-			),
+		race(// wave 1
+			loop(seq(run(spawn_skeleton_wave, game), wait(3.0))),// basic skeletons every 3 seconds
 			wait(30.0), // wait 30 seconds to spawn boss
 		),
 
@@ -172,53 +164,53 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 
 		// wave 2
 		// double spawn rate for skeletons
-		loop(
-			seq(
-				run(spawn_skeleton_wave, game),
-				wait(1.5),
-			)
-		)
+		loop(seq(run(spawn_skeleton_wave, game), wait(1.5))),
 	)
 }
 
 level_up_sequence :: proc(game: ^Game_World) -> ^Node {
 	return seq(
-		// pause gameplay
-		run(proc(data: rawptr) -> bool {
-			gw := (^Game_World)(data)
-			gw.is_paused = true
-			return true
-		}, game),
+		run(
+			proc(data: rawptr) -> bool { 	// pause gameplay
+				gw := (^Game_World)(data)
+				gw.is_paused = true
+				return true
+			},
+			game,
+		),
 
-	// upgrade ui, wait for input
-	wait_until(proc(data: rawptr) -> bool {
-		gw := (^Game_World)(data)
+		// upgrade ui, wait for input
+		wait_until(
+			proc(data: rawptr) -> bool {
+				gw := (^Game_World)(data)
 
-		// pressed [1] cooldown upgrade
-		if rl.IsKeyPressed(.ONE) {
-			for &weapon in gw.player.weapons {
-				if weapon.name == "Whip" {
-					weapon.cooldown = math.max(0.4, weapon.cooldown - 0.25)
+				// pressed [1] cooldown upgrade
+				if rl.IsKeyPressed(.ONE) {
+					for &weapon in gw.player.weapons {
+						if weapon.name == "Whip" {
+							weapon.cooldown = math.max(0.4, weapon.cooldown - 0.25)
+						}
+					}
+					return true
 				}
-			}
-			return true
-		}
-		// pressed [2] health recovery upgrade
-		if rl.IsKeyPressed(.TWO) {
-			gw.player.max_health += 30
-			gw.player.health = gw.player.max_health
-			return true
-		}
-		return false
-	}, game),
+				// pressed [2] health recovery upgrade
+				if rl.IsKeyPressed(.TWO) {
+					gw.player.max_health += 30
+					gw.player.health = gw.player.max_health
+					return true
+				}
+				return false
+			},
+			game,
+		),
 
-	// apply upgrade and resume game
-	run(proc(data: rawptr) -> bool {
-		gw := (^Game_World)(data)
-		gw.is_paused = false
-		return true
-	}, game),
-)
+		// apply upgrade and resume game
+		run(proc(data: rawptr) -> bool {
+				gw := (^Game_World)(data)
+				gw.is_paused = false
+				return true
+			}, game),
+	)
 }
 
 main :: proc() {
@@ -347,7 +339,11 @@ main :: proc() {
 					}
 				}
 
-				offscreen := proj.pos.x < -10 || proj.pos.x > W_WIDTH + 10 || proj.pos.y < -10 || proj.pos.y > W_HEIGHT + 10
+				offscreen :=
+					proj.pos.x < -10 ||
+					proj.pos.x > W_WIDTH + 10 ||
+					proj.pos.y < -10 ||
+					proj.pos.y > W_HEIGHT + 10
 				if hit || offscreen {
 					unordered_remove(&gw.projectiles, i)
 				}
@@ -391,7 +387,7 @@ main :: proc() {
 				rl.Rectangle{x = gem.x, y = gem.y, width = 8, height = 8},
 				rl.Vector2{4, 4},
 				45.0,
-				rl.SKYBLUE
+				rl.SKYBLUE,
 			)
 		}
 
@@ -413,10 +409,28 @@ main :: proc() {
 		}
 
 		hud_y := i32(10)
-		rl.DrawText(rl.TextFormat("HP: %d/%d", gw.player.health, gw.player.max_health), 10, hud_y, 16, rl.WHITE)
+		rl.DrawText(
+			rl.TextFormat("HP: %d/%d", gw.player.health, gw.player.max_health),
+			10,
+			hud_y,
+			16,
+			rl.WHITE,
+		)
 		rl.DrawText(rl.TextFormat("Level: %d", gw.player.level), 160, hud_y, 16, rl.GOLD)
-		rl.DrawText(rl.TextFormat("XP: %d/%d", gw.player.xp, gw.player.xp_needed), 280, hud_y, 16, rl.SKYBLUE)
-		rl.DrawText(rl.TextFormat("Active Enemies: %d", len(gw.enemies)), 440, hud_y, 16, rl.LIGHTGRAY)
+		rl.DrawText(
+			rl.TextFormat("XP: %d/%d", gw.player.xp, gw.player.xp_needed),
+			280,
+			hud_y,
+			16,
+			rl.SKYBLUE,
+		)
+		rl.DrawText(
+			rl.TextFormat("Active Enemies: %d", len(gw.enemies)),
+			440,
+			hud_y,
+			16,
+			rl.LIGHTGRAY,
+		)
 
 		// Level Up Card Screen
 		if gw.is_paused {
@@ -445,3 +459,4 @@ main :: proc() {
 		rl.EndDrawing()
 	}
 }
+

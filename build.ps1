@@ -1,6 +1,6 @@
 param (
     [Parameter(Mandatory=$false, Position=0)]
-    [ValidateSet("build", "run")]
+    [ValidateSet("build", "run", "test")]
     [string]$Action
 )
 
@@ -10,6 +10,14 @@ function Invoke-OdinBuild
 
     Write-Host "Building $Output..." -ForegroundColor Cyan
     odin build $Source -out:$Output -linker:radlink -show-timings
+}
+
+function Invoke-OdinTest
+{
+    param($Source)
+
+    Write-Host "Testing $Source..." -ForegroundColor Cyan
+    odin test $Source -all-packages
 }
 
 switch ($Action)
@@ -35,6 +43,10 @@ switch ($Action)
         {
             Write-Error "Build failed, cannot run."
         }
+    }
+    "test"
+    {
+        Invoke-OdinTest "src"
     }
     default
     {
