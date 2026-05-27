@@ -24,7 +24,7 @@ Node_VTable :: struct {
 	update:           proc(self: ^Node, exec: ^Executor, dt: f32) -> Status,
 	end:              proc(self: ^Node, exec: ^Executor, status: Status),
 	on_child_stopped: proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status,
-	destroy:          proc(self: ^Node, allocator: mem.Allocator),
+	destroy:          proc(self: ^Node, exec: ^Executor),
 }
 
 Node_Exec_Info :: struct {
@@ -52,17 +52,17 @@ executor_init :: proc(exec: ^Executor, allocator := context.allocator) {
 executor_destroy :: proc(exec: ^Executor) {
 	for info in exec.active_nodes {
 		if info.parent == nil && info.node != nil {
-			destroy_node(info.node, exec.allocator)
+			destroy_node(info.node, exec)
 		}
 	}
 	for info in exec.next_active_nodes {
 		if info.parent == nil && info.node != nil {
-			destroy_node(info.node, exec.allocator)
+			destroy_node(info.node, exec)
 		}
 	}
 	for info in exec.suspended_nodes {
 		if info.parent == nil && info.node != nil {
-			destroy_node(info.node, exec.allocator)
+			destroy_node(info.node, exec)
 		}
 	}
 	delete(exec.active_nodes)
@@ -70,9 +70,18 @@ executor_destroy :: proc(exec: ^Executor) {
 	delete(exec.suspended_nodes)
 }
 
-destroy_node :: proc(node: ^Node, allocator: mem.Allocator) {
+destroy_node :: proc(node: ^Node, exec: ^Executor) {
 	if node != nil {
-		node.destroy(node, allocator)
+		for &info in exec.active_nodes {
+			if info.node == node do info.node = nil
+		}
+		for &info in exec.next_active_nodes {
+			if info.node == node do info.node = nil
+		}
+		for &info in exec.suspended_nodes {
+			if info.node == node do info.node = nil
+		}
+		node.destroy(node, exec)
 	}
 }
 
@@ -85,7 +94,7 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 	for i := len(exec.suspended_nodes) - 1; i >= 0; i -= 1 {
 		if exec.suspended_nodes[i].status == .Aborted {
 			if exec.suspended_nodes[i].parent == nil {
-				destroy_node(exec.suspended_nodes[i].node, exec.allocator)
+				destroy_node(exec.suspended_nodes[i].node, exec)
 			}
 			unordered_remove(&exec.suspended_nodes, i)
 		}
@@ -96,9 +105,9 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 		info := exec.active_nodes[i]
 		i += 1
 
-		if info.status == .Aborted {
-			if info.parent == nil {
-				destroy_node(info.node, exec.allocator)
+		if info.node == nil || info.status == .Aborted {
+			if info.node != nil && info.parent == nil {
+				destroy_node(info.node, exec)
 			}
 			continue
 		}
@@ -186,7 +195,7 @@ process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status)
 			}
 		}
 	} else {
-		destroy_node(info.node, exec.allocator)
+		destroy_node(info.node, exec)
 	}
 }
 
@@ -236,7 +245,7 @@ wait_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
 Sequence_Node :: struct {
@@ -261,9 +270,9 @@ seq_vtable := Node_VTable {
 		s.child_index += 1; if s.child_index >= len(s.children) do return .Completed
 		enqueue_node(exec, s.children[s.child_index], s); return .Suspended
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		s := (^Sequence_Node)(self); for c in s.children do destroy_node(c, allocator)
-		delete(s.children); free(s, allocator)
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		s := (^Sequence_Node)(self); for c in s.children do destroy_node(c, exec)
+		delete(s.children); free(s, exec.allocator)
 	},
 }
 
@@ -289,9 +298,9 @@ select_vtable := Node_VTable {
 		s.child_index += 1; if s.child_index >= len(s.children) do return .Failed
 		enqueue_node(exec, s.children[s.child_index], s); return .Suspended
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		s := (^Select_Node)(self); for c in s.children do destroy_node(c, allocator)
-		delete(s.children); free(s, allocator)
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		s := (^Select_Node)(self); for c in s.children do destroy_node(c, exec)
+		delete(s.children); free(s, exec.allocator)
 	},
 }
 
@@ -315,7 +324,7 @@ callback_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
 Loop_Node :: struct {
@@ -350,8 +359,8 @@ loop_vtable := Node_VTable {
 	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
 		return status == .Failed ? .Completed : .Running
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		l := (^Loop_Node)(self); destroy_node(l.child, allocator); free(l, allocator)
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		l := (^Loop_Node)(self); destroy_node(l.child, exec); free(l, exec.allocator)
 	},
 }
 
@@ -385,9 +394,9 @@ race_vtable := Node_VTable {
 		}
 		return status
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		r := (^Race_Node)(self); for c in r.children do destroy_node(c, allocator)
-		delete(r.children); free(r, allocator)
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		r := (^Race_Node)(self); for c in r.children do destroy_node(c, exec)
+		delete(r.children); free(r, exec.allocator)
 	},
 }
 
@@ -423,9 +432,9 @@ sync_vtable := Node_VTable {
 		}
 		return .Suspended
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		s := (^Sync_Node)(self); for c in s.children do destroy_node(c, allocator)
-		delete(s.children); free(s, allocator)
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		s := (^Sync_Node)(self); for c in s.children do destroy_node(c, exec)
+		delete(s.children); free(s, exec.allocator)
 	},
 }
 
@@ -479,7 +488,7 @@ tween_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
 Condition_Node :: struct {
@@ -500,7 +509,7 @@ condition_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
 Scope_Node :: struct {
@@ -527,8 +536,8 @@ scope_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return status},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		s := (^Scope_Node)(self); destroy_node(s.child, allocator); free(s, allocator)
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		s := (^Scope_Node)(self); destroy_node(s.child, exec); free(s, exec.allocator)
 	},
 }
 
@@ -554,8 +563,8 @@ not_vtable := Node_VTable {
 		if status == .Failed do return .Completed
 		return status
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		n := (^Not_Node)(self); destroy_node(n.child, allocator); free(n, allocator)
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		n := (^Not_Node)(self); destroy_node(n.child, exec); free(n, exec.allocator)
 	},
 }
 
@@ -583,10 +592,10 @@ managed_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return status},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+	destroy = proc(self: ^Node, exec: ^Executor) {
 		m := (^Managed_Node)(self)
 		if m.payload != nil do free(m.payload, m.allocator)
-		destroy_node(m.child, allocator); free(m, allocator)
+		destroy_node(m.child, exec); free(m, exec.allocator)
 	},
 }
 
@@ -613,8 +622,8 @@ catch_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Completed},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		c := (^Catch_Node)(self); destroy_node(c.child, allocator); free(c, allocator)
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		c := (^Catch_Node)(self); destroy_node(c.child, exec); free(c, exec.allocator)
 	},
 }
 
@@ -642,7 +651,7 @@ wait_frames_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
 Capture_Return_Node :: struct {
@@ -669,10 +678,10 @@ capture_return_vtable := Node_VTable {
 		c.output^ = (status == .Completed)
 		return .Completed
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+	destroy = proc(self: ^Node, exec: ^Executor) {
 		c := (^Capture_Return_Node)(self)
-		destroy_node(c.child, allocator)
-		free(c, allocator)
+		destroy_node(c.child, exec)
+		free(c, exec.allocator)
 	},
 }
 
@@ -704,10 +713,10 @@ optional_seq_vtable := Node_VTable {
 		enqueue_node(exec, s.children[s.child_index], s)
 		return .Suspended
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Optional_Sequence_Node)(self)
-		for c in s.children do destroy_node(c, allocator)
-		delete(s.children); free(s, allocator)
+		for c in s.children do destroy_node(c, exec)
+		delete(s.children); free(s, exec.allocator)
 	},
 }
 
@@ -769,10 +778,10 @@ semaphore_vtable := Node_VTable {
 		}
 		return status
 	},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Semaphore_Handler_Node)(self)
-		destroy_node(s.child, allocator)
-		free(s, allocator)
+		destroy_node(s.child, exec)
+		free(s, exec.allocator)
 	},
 }
 
@@ -816,7 +825,7 @@ fork_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
 Wait_Forever_Node :: struct {
@@ -833,7 +842,7 @@ wait_forever_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
 Weak_Node :: struct {
@@ -848,7 +857,7 @@ weak_vtable := Node_VTable {
 		w := (^Weak_Node)(self)
 		if !w.is_valid(w.payload) do return .Failed
 		enqueue_node(exec, w.child, w)
-		return .Suspended
+		return .Running
 	},
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
 		w := (^Weak_Node)(self)
@@ -856,7 +865,9 @@ weak_vtable := Node_VTable {
 			abort_node(exec, w.child)
 			return .Failed
 		}
-		return .Suspended
+		if w.child.status == .Completed do return .Completed
+		if w.child.status == .Failed do return .Failed
+		return .Running
 	},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {
 		w := (^Weak_Node)(self)
@@ -869,9 +880,11 @@ weak_vtable := Node_VTable {
 		exec: ^Executor,
 		status: Status,
 		child: ^Node,
-	) -> Status {return status},
-	destroy = proc(self: ^Node, allocator: mem.Allocator) {
-		w := (^Weak_Node)(self); destroy_node(w.child, allocator); free(self, allocator)
+	) -> Status {
+		return status
+	},
+	destroy = proc(self: ^Node, exec: ^Executor) {
+		w := (^Weak_Node)(self); destroy_node(w.child, exec); free(self, exec.allocator)
 	},
 }
 
