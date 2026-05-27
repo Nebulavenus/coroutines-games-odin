@@ -74,12 +74,15 @@ destroy_node :: proc(node: ^Node, exec: ^Executor) {
 	if node != nil {
 		for &info in exec.active_nodes {
 			if info.node == node do info.node = nil
+			if info.parent == node do info.parent = nil
 		}
 		for &info in exec.next_active_nodes {
 			if info.node == node do info.node = nil
+			if info.parent == node do info.parent = nil
 		}
 		for &info in exec.suspended_nodes {
 			if info.node == node do info.node = nil
+			if info.parent == node do info.parent = nil
 		}
 		node.destroy(node, exec)
 	}
@@ -525,7 +528,12 @@ scope_vtable := Node_VTable {
 	},
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Suspended},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {
-		s := (^Scope_Node)(self); s.on_exit(s.payload, status)
+		s := (^Scope_Node)(self)
+		// run once
+		if s.on_exit != nil {
+			s.on_exit(s.payload, status)
+			s.on_exit = nil
+		}
 		if status == .Aborted && (s.child.status == .Running || s.child.status == .Suspended) {
 			abort_node(exec, s.child)
 		}
@@ -537,7 +545,13 @@ scope_vtable := Node_VTable {
 		child: ^Node,
 	) -> Status {return status},
 	destroy = proc(self: ^Node, exec: ^Executor) {
-		s := (^Scope_Node)(self); destroy_node(s.child, exec); free(s, exec.allocator)
+		s := (^Scope_Node)(self)
+		if s.on_exit != nil {
+			s.on_exit(s.payload, .Aborted)
+			s.on_exit = nil
+		}
+		destroy_node(s.child, exec)
+		free(s, exec.allocator)
 	},
 }
 
@@ -594,8 +608,12 @@ managed_vtable := Node_VTable {
 	) -> Status {return status},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		m := (^Managed_Node)(self)
-		if m.payload != nil do free(m.payload, m.allocator)
-		destroy_node(m.child, exec); free(m, exec.allocator)
+		if m.payload != nil {
+			free(m.payload, m.allocator)
+			m.payload = nil // double free in complex abort cycles?
+		}
+		destroy_node(m.child, exec)
+		free(m, exec.allocator)
 	},
 }
 
@@ -755,6 +773,7 @@ semaphore_vtable := Node_VTable {
 		if status == .Aborted {
 			if s.acquired {
 				semaphore_release(s.sem)
+				s.acquired = false
 			} else {
 				for i := 0; i < len(s.sem.queued); i += 1 {
 					if s.sem.queued[i] == s {
@@ -780,6 +799,19 @@ semaphore_vtable := Node_VTable {
 	},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Semaphore_Handler_Node)(self)
+
+		if s.acquired {
+			semaphore_release(s.sem)
+			s.acquired = false
+		} else {
+			for i := 0; i < len(s.sem.queued); i += 1 {
+				if s.sem.queued[i] == s {
+					unordered_remove(&s.sem.queued, i)
+					break
+				}
+			}
+		}
+
 		destroy_node(s.child, exec)
 		free(s, exec.allocator)
 	},

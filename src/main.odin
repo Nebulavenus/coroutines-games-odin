@@ -35,6 +35,7 @@ Player :: struct {
 	weapons:          [dynamic]^Weapon,
 	whip_flash_timer: f32,
 	shield_active:    bool,
+	pending_level_ups: int,
 }
 
 Enemy :: struct {
@@ -184,7 +185,9 @@ death_pop_behavior :: proc(game: ^Game_World, pos: [2]f32) -> ^Node {
 
 	append(&game.pop_effects, p)
 
-	return managed(fork(
+	// don't delete payload here with managed, executor can delete pop_effect quicker
+	// than animation happens in main loop causing dangling pointer
+	return fork(
 			seq(
 				tween(0.0, 30.0, 0.8, &p.radius, ease_in_out_elastic),
 				tween(30.0, 0.0, 0.4, &p.radius, ease_in_out_cubic),
@@ -193,8 +196,7 @@ death_pop_behavior :: proc(game: ^Game_World, pos: [2]f32) -> ^Node {
 					p.ended = true
 					return true
 				}, p)
-			),
-		), p, game.sys_exec.allocator)
+			))
 }
 
 whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
@@ -566,7 +568,11 @@ main :: proc() {
 			// Update Pop Effects
 			for i := len(gw.pop_effects) - 1; i >= 0; i -= 1 {
 				eff := gw.pop_effects[i]
-				if eff.ended do unordered_remove(&gw.pop_effects, i)
+				if eff.ended {
+					// clean pop effect here, instead of coroutine... safely
+					free(eff, gw.sys_exec.allocator)
+					unordered_remove(&gw.pop_effects, i)
+				}
 			}
 		}
 
