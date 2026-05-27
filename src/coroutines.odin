@@ -1,7 +1,9 @@
 package main
 
+import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:strings"
 
 Status :: enum {
 	None,
@@ -17,6 +19,9 @@ Node :: struct {
 	parent:     ^Node,
 	status:     Status,
 	name:       string,
+	user_name:  string,
+	is_leaf:    bool,
+	is_scope:   bool,
 }
 
 Node_VTable :: struct {
@@ -24,6 +29,7 @@ Node_VTable :: struct {
 	update:           proc(self: ^Node, exec: ^Executor, dt: f32) -> Status,
 	end:              proc(self: ^Node, exec: ^Executor, status: Status),
 	on_child_stopped: proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status,
+	get_debug_info:   proc(self: ^Node, buf: []byte) -> string,
 	destroy:          proc(self: ^Node, exec: ^Executor),
 }
 
@@ -33,12 +39,110 @@ Node_Exec_Info :: struct {
 	status: Status,
 }
 
+Debug_Node :: struct {
+	id:         rawptr,
+	parent_id:  rawptr,
+	name:       string,
+	user_name:  string,
+	status:     Status,
+	info:       string,
+	start_time: f64,
+	end_time:   f64,
+	is_leaf:    bool,
+	is_scope:   bool,
+	depth:      int,
+}
+
+Diagnostics_DB :: struct {
+	enabled:   bool,
+	entries:   map[rawptr]Debug_Node,
+	allocator: mem.Allocator,
+}
+
+diagnostics_db_init :: proc(db: ^Diagnostics_DB, allocator := context.allocator) {
+	db.allocator = allocator
+	db.enabled = true
+	db.entries = make(map[rawptr]Debug_Node, 128, allocator)
+}
+
+diagnostics_db_destroy :: proc(db: ^Diagnostics_DB) {
+	for id, &entry in db.entries {
+		if len(entry.info) > 0 do delete(entry.info, db.allocator)
+	}
+	delete(db.entries)
+}
+
+diagnostics_cleanup_node :: proc(db: ^Diagnostics_DB, node: ^Node) {
+	if db == nil || node == nil do return
+	if entry, found := db.entries[node]; found {
+		if len(entry.info) > 0 {
+			delete(entry.info, db.allocator)
+		}
+		delete_key(&db.entries, node)
+	}
+}
+
+diagnostics_notify_destroyed :: proc(db: ^Diagnostics_DB, node: ^Node, time: f64) {
+	if db == nil || !db.enabled || node == nil do return
+	if node in db.entries {
+		entry := db.entries[node]
+		if entry.end_time == 0 {
+			entry.end_time = time
+			db.entries[node] = entry
+		}
+	}
+}
+
+diagnostics_update_node :: proc(db: ^Diagnostics_DB, node: ^Node, time: f64) {
+	if db == nil || !db.enabled || node == nil do return
+
+	entry, found := db.entries[node]
+	if !found {
+		entry = Debug_Node {
+			id         = node,
+			parent_id  = node.parent,
+			name       = node.name,
+			user_name  = node.user_name,
+			status     = node.status,
+			start_time = time,
+			is_leaf    = node.is_leaf,
+			is_scope   = node.is_scope,
+		}
+	}
+
+	entry.status = node.status
+	entry.parent_id = node.parent
+	entry.user_name = node.user_name
+
+	if node.get_debug_info != nil {
+		buf: [128]byte
+		info := node.get_debug_info(node, buf[:])
+		if len(info) > 0 {
+			// Avoid leak: free old string before cloning new one
+			if len(entry.info) > 0 do delete(entry.info, db.allocator)
+			entry.info = strings.clone(info, db.allocator)
+		} else {
+			if len(entry.info) > 0 do delete(entry.info, db.allocator)
+			entry.info = ""
+		}
+	}
+	if node.status == .Completed || node.status == .Failed || node.status == .Aborted {
+		if entry.end_time == 0 do entry.end_time = time
+	} else {
+		entry.end_time = 0
+	}
+
+	db.entries[node] = entry
+}
+
 Executor :: struct {
 	active_nodes:      [dynamic]Node_Exec_Info,
 	next_active_nodes: [dynamic]Node_Exec_Info,
 	suspended_nodes:   [dynamic]Node_Exec_Info,
 	step_count:        int,
+	total_time:        f64,
 	allocator:         mem.Allocator,
+	debugger:          ^Diagnostics_DB,
 }
 
 executor_init :: proc(exec: ^Executor, allocator := context.allocator) {
@@ -47,6 +151,8 @@ executor_init :: proc(exec: ^Executor, allocator := context.allocator) {
 	exec.next_active_nodes = make([dynamic]Node_Exec_Info, allocator)
 	exec.suspended_nodes = make([dynamic]Node_Exec_Info, allocator)
 	exec.step_count = 0
+	exec.total_time = 0
+	exec.debugger = nil
 }
 
 executor_destroy :: proc(exec: ^Executor) {
@@ -70,8 +176,17 @@ executor_destroy :: proc(exec: ^Executor) {
 	delete(exec.suspended_nodes)
 }
 
+executor_shrink :: proc(exec: ^Executor) {
+	shrink(&exec.active_nodes)
+	shrink(&exec.next_active_nodes)
+	shrink(&exec.suspended_nodes)
+}
+
 destroy_node :: proc(node: ^Node, exec: ^Executor) {
 	if node != nil {
+		// Mark node as dead for fade-out, but don't delete entry yet
+		diagnostics_notify_destroyed(exec.debugger, node, exec.total_time)
+
 		for &info in exec.active_nodes {
 			if info.node == node do info.node = nil
 			if info.parent == node do info.parent = nil
@@ -90,10 +205,13 @@ destroy_node :: proc(node: ^Node, exec: ^Executor) {
 
 enqueue_node :: proc(exec: ^Executor, node: ^Node, parent: ^Node = nil) {
 	node.parent = parent
+	diagnostics_update_node(exec.debugger, node, exec.total_time)
 	append(&exec.active_nodes, Node_Exec_Info{node = node, parent = parent, status = .None})
 }
 
 executor_step :: proc(exec: ^Executor, dt: f32) {
+	exec.total_time += f64(dt)
+
 	for i := len(exec.suspended_nodes) - 1; i >= 0; i -= 1 {
 		if exec.suspended_nodes[i].status == .Aborted {
 			if exec.suspended_nodes[i].parent == nil {
@@ -118,6 +236,7 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 		if info.status == .None {
 			info.status = info.node.start(info.node, exec)
 			info.node.status = info.status
+			diagnostics_update_node(exec.debugger, info.node, exec.total_time)
 
 			if info.status == .Suspended {
 				append(&exec.suspended_nodes, info)
@@ -132,6 +251,7 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 		if info.status == .Running {
 			info.status = info.node.update(info.node, exec, dt)
 			info.node.status = info.status
+			diagnostics_update_node(exec.debugger, info.node, exec.total_time)
 
 			if info.status == .Suspended {
 				append(&exec.suspended_nodes, info)
@@ -162,6 +282,7 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status) {
 	info.node.end(info.node, exec, status)
 	info.node.status = status
+	diagnostics_update_node(exec.debugger, info.node, exec.total_time)
 
 	if info.parent != nil {
 		parent_status := info.parent.on_child_stopped(info.parent, exec, status, info.node)
@@ -169,6 +290,7 @@ process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status)
 		for j := 0; j < len(exec.active_nodes); j += 1 {
 			if exec.active_nodes[j].node == info.parent {
 				exec.active_nodes[j].status = parent_status
+				diagnostics_update_node(exec.debugger, exec.active_nodes[j].node, exec.total_time)
 			}
 		}
 
@@ -182,6 +304,7 @@ process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status)
 				} else {
 					exec.next_active_nodes[j].status = parent_status
 				}
+				diagnostics_update_node(exec.debugger, info.parent, exec.total_time)
 			}
 		}
 
@@ -195,6 +318,7 @@ process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status)
 				} else {
 					exec.suspended_nodes[j].status = parent_status
 				}
+				diagnostics_update_node(exec.debugger, info.parent, exec.total_time)
 			}
 		}
 	} else {
@@ -206,6 +330,7 @@ abort_node :: proc(exec: ^Executor, node: ^Node) {
 	if node == nil do return
 	node.end(node, exec, .Aborted)
 	node.status = .Aborted
+	diagnostics_update_node(exec.debugger, node, exec.total_time)
 
 	for &info in exec.active_nodes {
 		if info.node == node {
@@ -248,6 +373,11 @@ wait_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		w := (^Wait_Node)(self)
+		dur := w.duration_ptr != nil ? w.duration_ptr^ : w.duration
+		return fmt.bprintf(buf, "%.1fs / %.1fs", w.elapsed, dur)
+	},
 	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
@@ -272,6 +402,10 @@ seq_vtable := Node_VTable {
 		s := (^Sequence_Node)(self); if status == .Failed do return .Failed
 		s.child_index += 1; if s.child_index >= len(s.children) do return .Completed
 		enqueue_node(exec, s.children[s.child_index], s); return .Suspended
+	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		s := (^Sequence_Node)(self)
+		return fmt.bprintf(buf, "%d / %d", s.child_index + 1, len(s.children))
 	},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Sequence_Node)(self); for c in s.children do destroy_node(c, exec)
@@ -301,6 +435,10 @@ select_vtable := Node_VTable {
 		s.child_index += 1; if s.child_index >= len(s.children) do return .Failed
 		enqueue_node(exec, s.children[s.child_index], s); return .Suspended
 	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		s := (^Select_Node)(self)
+		return fmt.bprintf(buf, "%d / %d", s.child_index + 1, len(s.children))
+	},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Select_Node)(self); for c in s.children do destroy_node(c, exec)
 		delete(s.children); free(s, exec.allocator)
@@ -327,6 +465,7 @@ callback_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
@@ -362,6 +501,7 @@ loop_vtable := Node_VTable {
 	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
 		return status == .Failed ? .Completed : .Running
 	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		l := (^Loop_Node)(self); destroy_node(l.child, exec); free(l, exec.allocator)
 	},
@@ -396,6 +536,10 @@ race_vtable := Node_VTable {
 			}
 		}
 		return status
+	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		r := (^Race_Node)(self)
+		return fmt.bprintf(buf, "%d children", len(r.children))
 	},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		r := (^Race_Node)(self); for c in r.children do destroy_node(c, exec)
@@ -434,6 +578,10 @@ sync_vtable := Node_VTable {
 			return s.end_status
 		}
 		return .Suspended
+	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		s := (^Sync_Node)(self)
+		return fmt.bprintf(buf, "%d / %d closed", s.closed_count, len(s.children))
 	},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Sync_Node)(self); for c in s.children do destroy_node(c, exec)
@@ -491,6 +639,10 @@ tween_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		t := (^Tween_Node)(self)
+		return fmt.bprintf(buf, "%.2f (%.1fs / %.1fs)", t.output^, t.elapsed, t.duration)
+	},
 	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
@@ -512,6 +664,7 @@ condition_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return "Waiting..."},
 	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
@@ -544,6 +697,7 @@ scope_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return status},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Scope_Node)(self)
 		if s.on_exit != nil {
@@ -577,6 +731,7 @@ not_vtable := Node_VTable {
 		if status == .Failed do return .Completed
 		return status
 	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		n := (^Not_Node)(self); destroy_node(n.child, exec); free(n, exec.allocator)
 	},
@@ -606,6 +761,7 @@ managed_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return status},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		m := (^Managed_Node)(self)
 		if m.payload != nil {
@@ -640,6 +796,7 @@ catch_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Completed},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		c := (^Catch_Node)(self); destroy_node(c.child, exec); free(c, exec.allocator)
 	},
@@ -669,6 +826,10 @@ wait_frames_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		w := (^Wait_Frames_Node)(self)
+		return fmt.bprintf(buf, "%d / %d frames", w.elapsed_frames, w.target_frames)
+	},
 	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
@@ -696,6 +857,7 @@ capture_return_vtable := Node_VTable {
 		c.output^ = (status == .Completed)
 		return .Completed
 	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		c := (^Capture_Return_Node)(self)
 		destroy_node(c.child, exec)
@@ -730,6 +892,10 @@ optional_seq_vtable := Node_VTable {
 		if s.child_index >= len(s.children) do return .Completed
 		enqueue_node(exec, s.children[s.child_index], s)
 		return .Suspended
+	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		s := (^Optional_Sequence_Node)(self)
+		return fmt.bprintf(buf, "%d / %d", s.child_index + 1, len(s.children))
 	},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Optional_Sequence_Node)(self)
@@ -797,6 +963,10 @@ semaphore_vtable := Node_VTable {
 		}
 		return status
 	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {
+		s := (^Semaphore_Handler_Node)(self)
+		return s.acquired ? "Acquired" : "Waiting for Slot"
+	},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Semaphore_Handler_Node)(self)
 
@@ -857,6 +1027,7 @@ fork_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return "Forking..."},
 	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
@@ -874,6 +1045,7 @@ wait_forever_vtable := Node_VTable {
 		status: Status,
 		child: ^Node,
 	) -> Status {return .Failed},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return "Forever"},
 	destroy = proc(self: ^Node, exec: ^Executor) {free(self, exec.allocator)},
 }
 
@@ -915,10 +1087,12 @@ weak_vtable := Node_VTable {
 	) -> Status {
 		return status
 	},
+	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return "Guarding..."},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		w := (^Weak_Node)(self); destroy_node(w.child, exec); free(self, exec.allocator)
 	},
 }
+
 
 // api
 
@@ -952,12 +1126,12 @@ race :: proc(nodes: ..^Node, allocator := context.allocator) -> ^Node {
 
 wait :: proc(duration: f32, allocator := context.allocator) -> ^Node {
 	node := new(Wait_Node, allocator); node.base = &wait_vtable; node.duration = duration
-	node.name = "Wait"; return node
+	node.name = "Wait"; node.is_leaf = true; return node
 }
 
 wait_ptr :: proc(duration: ^f32, allocator := context.allocator) -> ^Node {
 	node := new(Wait_Node, allocator); node.base = &wait_vtable; node.duration_ptr = duration
-	node.name = "WaitPtr"; return node
+	node.name = "WaitPtr"; node.is_leaf = true; return node
 }
 
 run :: proc(
@@ -966,7 +1140,7 @@ run :: proc(
 	allocator := context.allocator,
 ) -> ^Node {
 	node := new(Callback_Node, allocator); node.base = &callback_vtable
-	node.callback = callback; node.payload = payload; node.name = "Callback"
+	node.callback = callback; node.payload = payload; node.name = "Callback"; node.is_leaf = true
 	return node
 }
 
@@ -984,7 +1158,7 @@ tween :: proc(
 	node := new(Tween_Node, allocator); node.base = &tween_vtable
 	node.start_val =
 		start; node.target_val = target; node.duration = duration; node.output = output; node.ease = ease
-	node.name = "Tween"; return node
+	node.name = "Tween"; node.is_leaf = true; return node
 }
 
 wait_until :: proc(
@@ -993,7 +1167,7 @@ wait_until :: proc(
 	allocator := context.allocator,
 ) -> ^Node {
 	node := new(Condition_Node, allocator); node.base = &condition_vtable
-	node.condition = condition; node.payload = payload; node.name = "WaitUntil"
+	node.condition = condition; node.payload = payload; node.name = "WaitUntil"; node.is_leaf = true
 	return node
 }
 
@@ -1003,7 +1177,7 @@ check :: proc(
 	allocator := context.allocator,
 ) -> ^Node {
 	node := new(Callback_Node, allocator); node.base = &callback_vtable
-	node.callback = condition; node.payload = payload; node.name = "Check"
+	node.callback = condition; node.payload = payload; node.name = "Check"; node.is_leaf = true
 	return node
 }
 
@@ -1015,7 +1189,7 @@ scope :: proc(
 ) -> ^Node {
 	node := new(Scope_Node, allocator); node.base = &scope_vtable
 	node.child = child; node.on_exit = on_exit; node.payload = payload
-	node.name = "Scope"; return node
+	node.name = "Scope"; node.is_scope = true; return node
 }
 
 not :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
@@ -1031,7 +1205,7 @@ catch :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 managed :: proc(child: ^Node, payload: rawptr, allocator := context.allocator) -> ^Node {
 	node := new(Managed_Node, allocator); node.base = &managed_vtable
 	node.child = child; node.payload = payload; node.allocator = allocator
-	node.name = "Managed"; return node
+	node.name = "Managed"; node.is_scope = true; return node
 }
 
 managed_run :: proc(
@@ -1047,7 +1221,7 @@ wait_frames :: proc(frames: int, allocator := context.allocator) -> ^Node {
 	node := new(Wait_Frames_Node, allocator)
 	node.base = &wait_frames_vtable
 	node.target_frames = frames
-	node.name = "WaitFrames"
+	node.name = "WaitFrames"; node.is_leaf = true
 	return node
 }
 
@@ -1079,7 +1253,7 @@ semaphore_scope :: proc(sem: ^Semaphore, child: ^Node, allocator := context.allo
 	node.child = child
 	node.sem = sem
 	node.acquired = false
-	node.name = "Semaphore"
+	node.name = "Semaphore"; node.is_scope = true
 	return node
 }
 
@@ -1098,7 +1272,7 @@ fork :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 
 wait_forever :: proc(allocator := context.allocator) -> ^Node {
 	node := new(Wait_Forever_Node, allocator); node.base = &wait_forever_vtable
-	node.name = "WaitForever"; return node
+	node.name = "WaitForever"; node.is_leaf = true; return node
 }
 
 weak :: proc(
@@ -1110,4 +1284,9 @@ weak :: proc(
 	node := new(Weak_Node, allocator); node.base = &weak_vtable
 	node.child = child; node.is_valid = is_valid; node.payload = payload
 	node.name = "Weak"; return node
+}
+
+named :: proc(node: ^Node, name: string) -> ^Node {
+	if node != nil do node.user_name = name
+	return node
 }
