@@ -62,11 +62,18 @@ Projectile :: struct {
 	is_enemy_projectile: bool,
 }
 
+Pop_Effect :: struct {
+	pos:    [2]f32,
+	radius: f32,
+	ended: bool,
+}
+
 Game_World :: struct {
 	player:              Player,
 	enemies:             [dynamic]Enemy,
 	gems:                [dynamic][2]f32,
 	projectiles:         [dynamic]Projectile,
+	pop_effects:         [dynamic]Pop_Effect,
 	exec:                Executor, // Pauses with game
 	sys_exec:            Executor, // Runs in real-time
 	charge_semaphore:    Semaphore,
@@ -170,17 +177,25 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 
 // Visual "Pop" effect (Spawned via Fork)
 death_pop_behavior :: proc(game: ^Game_World, pos: [2]f32) -> ^Node {
-	radius := new(f32)
-	radius^ = 0.0
-	return managed(
-		fork(
+	idx, _ := append(&game.pop_effects, Pop_Effect {
+		pos = pos,
+		ended = false,
+		radius = 0.0,
+	})
+	if len(game.pop_effects) == 0 { return nop() }
+	pop_effect := &game.pop_effects[idx-1]
+	radius := &pop_effect.radius
+	return fork(
 			seq(
-				tween(0.0, 30.0, 0.2, radius, ease_in_out_cubic),
-				tween(30.0, 0.0, 0.1, radius, ease_in_out_cubic),
+				tween(0.0, 30.0, 0.8, radius, ease_in_out_elastic),
+				tween(30.0, 0.0, 0.4, radius, ease_in_out_cubic),
+				run(proc(data: rawptr) -> bool {
+					p := (^Pop_Effect)(data)
+					p.ended = true
+					return true
+				}, pop_effect)
 			),
-		),
-		radius,
-	)
+		)
 }
 
 whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
@@ -415,6 +430,7 @@ main :: proc() {
 		delete(gw.enemies)
 		delete(gw.gems)
 		delete(gw.projectiles)
+		delete(gw.pop_effects)
 		executor_destroy(&gw.exec)
 		executor_destroy(&gw.sys_exec)
 		semaphore_destroy(&gw.charge_semaphore)
@@ -494,8 +510,8 @@ main :: proc() {
 				// Death
 				if e.health <= 0 {
 					append(&gw.gems, e.pos)
-					unordered_remove(&gw.enemies, i)
 					enqueue_node(&gw.sys_exec, death_pop_behavior(&gw, e.pos)) // Visual effect on death
+					unordered_remove(&gw.enemies, i)
 				}
 			}
 
@@ -546,6 +562,12 @@ main :: proc() {
 						}
 					}
 				}
+			}
+
+			// Update Pop Effects
+			for i := len(gw.pop_effects) - 1; i >= 0; i -= 1 {
+				eff := gw.pop_effects[i]
+				if eff.ended do unordered_remove(&gw.pop_effects, i)
 			}
 		}
 
@@ -602,6 +624,10 @@ main :: proc() {
 				5.0,
 				p.is_enemy_projectile ? rl.VIOLET : rl.GOLD,
 			)
+		}
+
+		for eff in gw.pop_effects {
+			rl.DrawCircleLinesV(cast(rl.Vector2)(eff.pos + shake), eff.radius, rl.WHITE)
 		}
 
 		p_col := gw.player_damage_timer > 0.0 ? rl.ORANGE : rl.GREEN
