@@ -797,6 +797,84 @@ semaphore_release :: proc(sem: ^Semaphore) {
 	}
 }
 
+Fork_Node :: struct {
+	using node: Node,
+	child:      ^Node,
+}
+
+fork_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		f := (^Fork_Node)(self)
+		enqueue_node(exec, f.child, nil)
+		return .Completed
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Completed},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {},
+	on_child_stopped = proc(
+		self: ^Node,
+		exec: ^Executor,
+		status: Status,
+		child: ^Node,
+	) -> Status {return .Failed},
+	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+}
+
+Wait_Forever_Node :: struct {
+	using node: Node,
+}
+
+wait_forever_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {return .Suspended},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Suspended},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {},
+	on_child_stopped = proc(
+		self: ^Node,
+		exec: ^Executor,
+		status: Status,
+		child: ^Node,
+	) -> Status {return .Failed},
+	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+}
+
+Weak_Node :: struct {
+	using node: Node,
+	child:      ^Node,
+	is_valid:   proc(_: rawptr) -> bool,
+	payload:    rawptr,
+}
+
+weak_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		w := (^Weak_Node)(self)
+		if !w.is_valid(w.payload) do return .Failed
+		enqueue_node(exec, w.child, w)
+		return .Suspended
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
+		w := (^Weak_Node)(self)
+		if !w.is_valid(w.payload) {
+			abort_node(exec, w.child)
+			return .Failed
+		}
+		return .Suspended
+	},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {
+		w := (^Weak_Node)(self)
+		if status == .Aborted && (w.child.status == .Running || w.child.status == .Suspended) {
+			abort_node(exec, w.child)
+		}
+	},
+	on_child_stopped = proc(
+		self: ^Node,
+		exec: ^Executor,
+		status: Status,
+		child: ^Node,
+	) -> Status {return status},
+	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+		w := (^Weak_Node)(self); destroy_node(w.child, allocator); free(self, allocator)
+	},
+}
+
 // api
 
 seq :: proc(nodes: ..^Node, allocator := context.allocator) -> ^Node {
@@ -968,3 +1046,23 @@ error_node :: proc(allocator := context.allocator) -> ^Node {
 	return run(proc(_: rawptr) -> bool {return false}, nil, allocator)
 }
 
+fork :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
+	node := new(Fork_Node, allocator); node.base = &fork_vtable; node.child = child
+	node.name = "Fork"; return node
+}
+
+wait_forever :: proc(allocator := context.allocator) -> ^Node {
+	node := new(Wait_Forever_Node, allocator); node.base = &wait_forever_vtable
+	node.name = "WaitForever"; return node
+}
+
+weak :: proc(
+	child: ^Node,
+	is_valid: proc(_: rawptr) -> bool,
+	payload: rawptr,
+	allocator := context.allocator,
+) -> ^Node {
+	node := new(Weak_Node, allocator); node.base = &weak_vtable
+	node.child = child; node.is_valid = is_valid; node.payload = payload
+	node.name = "Weak"; return node
+}

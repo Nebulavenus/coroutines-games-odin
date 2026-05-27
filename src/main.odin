@@ -86,7 +86,7 @@ find_enemy :: proc(game: ^Game_World, id: int) -> ^Enemy {
 	return nil
 }
 
-// Ranged attack for Wizard
+// Ranged attack for Wizard, Telegraph -> Shoot (Protected by Weak guard)
 wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 	// Local coro state
 	Payload :: struct {
@@ -97,48 +97,39 @@ wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 	p.game = game
 	p.id = enemy_id
 
-	// Wrap in managed so that payload p is freed automatically
-	return managed(
+	is_alive :: proc(d: rawptr) -> bool {
+		p := (^Payload)(d); return find_enemy(p.game, p.id) != nil
+	}
+
+	return managed(weak(
 		seq(
 			sync(
-				run(
-					proc(data: rawptr) -> bool { 	// Telegraph phase
-						p := (^Payload)(data)
-						if e := find_enemy(p.game, p.id); e != nil {
-							e.telegraph_timer = 0.8
-							return true
-						}
-						return false
-					},
-					p,
-				),
-				wait(0.8),
-			),
-			// Shoot phase
-			run(proc(data: rawptr) -> bool {
-					p := (^Payload)(data)
-					if e := find_enemy(p.game, p.id); e != nil {
-						dir := linalg.normalize(p.game.player.pos - e.pos)
-						append(
-							&p.game.projectiles,
-							Projectile {
-								pos = e.pos,
-								dir = dir,
-								speed = 240.0,
-								damage = 15,
-								is_enemy_projectile = true,
-							},
-						)
-						return true
-					}
-					return false
+				run(proc(d: rawptr) -> bool {
+					p := (^Payload)(d)
+					find_enemy(p.game, p.id).telegraph_timer = 0.8
+					return true
 				}, p),
-		),
-		p,
-	)
+				wait(0.8)
+			),
+			run(proc(d: rawptr) -> bool {
+				p := (^Payload)(d)
+				e := find_enemy(p.game, p.id)
+				dir := linalg.normalize(p.game.player.pos - e.pos)
+				append(
+					&p.game.projectiles,
+					Projectile {
+						pos = e.pos,
+						dir = dir,
+						speed = 240.0,
+						damage = 15,
+						is_enemy_projectile = true,
+					},
+				)
+				return true
+		}, p)), is_alive, p), p)
 }
 
-// Dash attack for Elites
+// Dash attack for Elites (Protected by Weak + Semaphore)
 elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 	Payload :: struct {
 		game: ^Game_World,
@@ -148,36 +139,44 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 	p.game = game
 	p.id = enemy_id
 
-	return managed(
-		semaphore_scope(
-			&game.charge_semaphore,
+	is_alive :: proc(d: rawptr) -> bool {
+		p := (^Payload)(d)
+		return find_enemy(p.game, p.id) != nil
+	}
+
+	return managed(weak(
+		semaphore_scope(&game.charge_semaphore, // only allows two elites to run this dash
 			seq(
-				run(
-					proc(data: rawptr) -> bool { 	// Start Charge
-						p := (^Payload)(data)
-						if e := find_enemy(p.game, p.id); e != nil {
-							e.speed *= 3.5
-							e.is_charging = true
-							return true
-						}
-						return false
-					},
-					p,
-				),
+				run(proc(d: rawptr) -> bool { // start charge
+					p := (^Payload)(d)
+					e := find_enemy(p.game, p.id)
+					e.speed *= 3.5
+					e.is_charging = true
+					return true
+				}, p),
 				wait(1.0),
-				// Stop Charge
-				run(proc(data: rawptr) -> bool {
-						p := (^Payload)(data)
-						if e := find_enemy(p.game, p.id); e != nil {
-							e.speed /= 3.5
-							e.is_charging = false
-							return true
-						}
-						return false
-					}, p),
+				run(proc(d: rawptr) -> bool { // stop it
+					p := (^Payload)(d)
+					e := find_enemy(p.game, p.id)
+					e.speed /= 3.5
+					e.is_charging = false
+					return true
+			}, p))
+		), is_alive, p), p)
+}
+
+// Visual "Pop" effect (Spawned via Fork)
+death_pop_behavior :: proc(game: ^Game_World, pos: [2]f32) -> ^Node {
+	radius := new(f32)
+	radius^ = 0.0
+	return managed(
+		fork(
+			seq(
+				tween(0.0, 30.0, 0.2, radius, ease_in_out_cubic),
+				tween(30.0, 0.0, 0.1, radius, ease_in_out_cubic),
 			),
 		),
-		p,
+		radius,
 	)
 }
 
@@ -188,22 +187,19 @@ whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 		weapon: ^Weapon,
 	}
 
-	payload := new(Weapon_Payload)
-	payload.game = game
-	payload.weapon = weapon
-
-	// managed() wraps the whole loop. When weapon is removed, this entire node is aborted
-	// and its payload is automatically freed.
-	return managed(loop(seq(wait_ptr(&weapon.cooldown), run(proc(data: rawptr) -> bool {
-						p := (^Weapon_Payload)(data)
-						for &e in p.game.enemies {
-							if linalg.distance(e.pos, p.game.player.pos) < 110.0 {
-								e.health -= p.weapon.damage
-							}
-						}
-						p.game.player.whip_flash_timer = 0.15
-						return true
-					}, payload))), payload)
+	p := new(Weapon_Payload); p.game = game; p.weapon = weapon
+	return managed(loop(
+		seq(
+			wait_ptr(&weapon.cooldown),
+			run(proc(d: rawptr) -> bool {
+				p := (^Weapon_Payload)(d)
+				for &e in p.game.enemies {
+					if linalg.distance(e.pos, p.game.player.pos) < 110.0 do e.health -= p.weapon.damage
+				}
+				p.game.player.whip_flash_timer = 0.15
+				return true
+			}, p)
+		)), p)
 }
 
 fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
@@ -213,88 +209,69 @@ fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 		weapon: ^Weapon,
 	}
 
-	payload := new(Weapon_Payload)
-	payload.game = game
-	payload.weapon = weapon
+	p := new(Weapon_Payload)
+	p.game = game
+	p.weapon = weapon
+	return managed(loop(
+		seq(
+			wait_ptr(&weapon.cooldown),
+			run(proc(d: rawptr) -> bool {
+				p := (^Weapon_Payload)(d)
+				if len(p.game.enemies) == 0 do return true
+				nearest := 0
+				min_d := f32(99999.0)
+				for e, i in p.game.enemies {
+					d := linalg.distance(e.pos, p.game.player.pos)
+					if d < min_d {
+						min_d = d
+						nearest = i
+					}
+				}
 
-	return managed(loop(seq(wait_ptr(&weapon.cooldown), run(proc(data: rawptr) -> bool {
-						p := (^Weapon_Payload)(data)
-						if len(p.game.enemies) == 0 do return true
-
-						nearest := 0
-						min_dist := f32(99999.0)
-						for e, i in p.game.enemies {
-							d := linalg.distance(e.pos, p.game.player.pos)
-							if d < min_dist {
-								min_dist = d
-								nearest = i
-							}
-						}
-
-						dir := linalg.normalize(p.game.enemies[nearest].pos - p.game.player.pos)
-						append(&p.game.projectiles, Projectile{pos = p.game.player.pos, dir = dir, speed = 320.0, damage = p.weapon.damage})
-						return true
-					}, payload))), payload)
-}
-
-level_up_juice :: proc(game: ^Game_World) -> ^Node {
-	return optional_seq(
-		run(
-			proc(d: rawptr) -> bool {(^Game_World)(d).player.whip_flash_timer = 0.2; return true},
-			game,
-		),
-		wait_frames(8),
-		run(
-			proc(d: rawptr) -> bool {(^Game_World)(d).player.whip_flash_timer = 0.2; return true},
-			game,
-		),
-		wait_frames(8),
-		run(
-			proc(d: rawptr) -> bool {(^Game_World)(d).player.whip_flash_timer = 0.2; return true},
-			game,
-		),
-	)
+				dir := linalg.normalize(p.game.enemies[nearest].pos - p.game.player.pos)
+				append(&p.game.projectiles, Projectile{
+					pos = p.game.player.pos,
+					dir = dir,
+					speed = 320.0,
+					damage = p.weapon.damage
+				})
+				return true
+			}, p)
+		)), p)
 }
 
 level_up_sequence :: proc(game: ^Game_World) -> ^Node {
 	return seq(
-		run(
-			proc(d: rawptr) -> bool { 	// Pause and Show UI
-				gw := (^Game_World)(d)
-				gw.is_paused = true
-				gw.level_up_scale = 0
+		run(proc(d: rawptr) -> bool { // pause game
+			g := (^Game_World)(d)
+			g.is_paused = true
+			g.level_up_scale = 0
+			return true
+		}, game),
+		tween(0.0, 1.0, 0.4, &game.level_up_scale, ease_in_out_cubic), // open shop ui anim
+		wait_until(proc(d: rawptr) -> bool { // until upgrade is not selected, waits here
+			g := (^Game_World)(d)
+			if rl.IsKeyPressed(.ONE) {
+				for &w in g.player.weapons do w.cooldown *= 0.8
 				return true
-			},
-			game,
-		),
-		tween(0.0, 1.0, 0.8, &game.level_up_scale, ease_in_out_cubic),
-		// Wait for Input
-		wait_until(proc(d: rawptr) -> bool {
-				gw := (^Game_World)(d)
-				if rl.IsKeyPressed(.ONE) {
-					for &w in gw.player.weapons do w.cooldown *= 0.8
-					return true
-				}
-				if rl.IsKeyPressed(.TWO) {
-					for &w in gw.player.weapons do w.damage += 15
-					gw.player.max_health += 25
-					gw.player.health = gw.player.max_health
-					return true
-				}
-				if rl.IsKeyPressed(.THREE) {
-					enqueue_node(&gw.exec, shield_behavior(gw, 5.0))
-					return true
-				}
-				return false
-			}, game),
-		// Feedback and Close
-		level_up_juice(game),
-		tween(1.0, 0.0, 0.4, &game.level_up_scale, ease_in_out_cubic),
+			}
+			if rl.IsKeyPressed(.TWO) {
+				for &w in g.player.weapons do w.damage += 15
+				g.player.max_health += 25
+				g.player.health = g.player.max_health
+				return true
+			}
+			if rl.IsKeyPressed(.THREE) {
+				enqueue_node(&g.exec, shield_behavior(g, 5.0))
+				return true
+			}
+			return false
+		}, game),
+		tween(1.0, 0.0, 0.2, &game.level_up_scale, ease_in_out_cubic), // close shop ui anim
 		run(proc(d: rawptr) -> bool {
-				(^Game_World)(d).is_paused = false
-				return true
-			}, game),
-	)
+			(^Game_World)(d).is_paused = false
+			return true
+		}, game))
 }
 
 shield_behavior :: proc(game: ^Game_World, duration: f32) -> ^Node {
@@ -303,27 +280,34 @@ shield_behavior :: proc(game: ^Game_World, duration: f32) -> ^Node {
 			proc(d: rawptr) -> bool {(^Game_World)(d).player.shield_active = true; return true},
 			game,
 		),
-		scope(
-			wait(duration),
-			proc(d: rawptr, s: Status) {(^Game_World)(d).player.shield_active = false},
+		// Race against timer: Stay active until timer wins
+		race(wait(duration), wait_forever()),
+		run(
+			proc(d: rawptr) -> bool {(^Game_World)(d).player.shield_active = false; return true},
 			game,
 		),
 	)
 }
 
 super_attack_behavior :: proc(game: ^Game_World) -> ^Node {
-	return seq(sync(apply_camera_shake(game, 15.0), wait(0.5)), run(proc(d: rawptr) -> bool {
-				gw := (^Game_World)(d)
-				for i in 0 ..< 12 {
-					angle := f32(i) * math.PI / 6.0
-					dir := [2]f32{math.cos(angle), math.sin(angle)}
-					append(
-						&gw.projectiles,
-						Projectile{pos = gw.player.pos, dir = dir, speed = 450.0, damage = 100},
-					)
-				}
-				return true
-			}, game))
+	return seq(
+		sync(apply_camera_shake(game, 15.0), wait(0.5)), // blocks until two parallel actions completes
+		run(proc(d: rawptr) -> bool {
+			g := (^Game_World)(d)
+			for i in 0 ..< 12 {
+				a := f32(i) * math.PI / 6.0
+				append(
+					&g.projectiles,
+					Projectile {
+						pos = g.player.pos,
+						dir = {math.cos(a), math.sin(a)},
+						speed = 450.0,
+						damage = 100,
+					},
+				)
+			}
+			return true
+		}, game))
 }
 
 apply_camera_shake :: proc(game: ^Game_World, amount: f32) -> ^Node {
@@ -343,9 +327,9 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 		case .Elite_Skeleton:
 			hp = 100; spd = 65.0
 		case .Wizard:
-			hp = 40; spd = 45.0
+			hp = 40; spd = 45.0; dist = 300.0
 		case .Boss:
-			hp = 500; spd = 50.0; dist = 220.0
+			hp = 600; spd = 50.0; dist = 220.0
 		case .Skeleton:
 		}
 
@@ -360,22 +344,12 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 			},
 		)
 	}
-
-	return loop(
-		seq(
+	return loop(seq(
 			select(
-				seq(
-					check(
-						proc(d: rawptr) -> bool { 	// Try Boss Spawn
+				seq(check(proc(d: rawptr) -> bool {
 							g := (^Game_World)(d)
-							return(
-								g.player.level > 0 &&
-								g.player.level % 5 == 0 &&
-								g.boss_spawned_at != g.player.level \
-							)
-						},
-						game,
-					),
+							return g.player.level > 0 && g.player.level % 5 == 0 && g.boss_spawned_at != g.player.level
+						}, game),
 					run(proc(d: rawptr) -> bool {
 							g := (^Game_World)(d)
 							g.boss_spawned_at = g.player.level
@@ -383,19 +357,20 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 							enqueue_node(&g.sys_exec, apply_camera_shake(g, 10.0))
 							return true
 						}, game),
-					wait(20.0),
+					wait(20.0)
 				),
-				// Normal Wave Spawn
-				seq(race(wait(3.0), wait_until(proc(d: rawptr) -> bool {return (^Game_World)(d).player.health < 30}, game)), run(proc(d: rawptr) -> bool {
-							g := (^Game_World)(d)
-							spawn(g, .Skeleton)
-							if rand.float32() < 0.4 do spawn(g, .Wizard)
-							if rand.float32() < 0.2 do spawn(g, .Elite_Skeleton)
-							return true
+				seq(race(wait(3.0), wait_until(proc(d: rawptr) -> bool {
+							return (^Game_World)(d).player.health < 30
 						}, game)),
-			),
-		),
-	)
+					run(proc(d: rawptr) -> bool {
+						g := (^Game_World)(d)
+						spawn(g, .Skeleton)
+						if rand.float32() < 0.4 do spawn(g, .Wizard)
+						if rand.float32() < 0.2 do spawn(g, .Elite_Skeleton)
+						return true
+					}, game)
+				)
+			)))
 }
 
 main :: proc() {
@@ -517,6 +492,7 @@ main :: proc() {
 				if e.health <= 0 {
 					append(&gw.gems, e.pos)
 					unordered_remove(&gw.enemies, i)
+					enqueue_node(&gw.sys_exec, death_pop_behavior(&gw, e.pos)) // Visual effect on death
 				}
 			}
 
@@ -677,4 +653,3 @@ main :: proc() {
 		rl.EndDrawing()
 	}
 }
-

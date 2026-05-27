@@ -458,3 +458,72 @@ test_managed_node :: proc(t: ^testing.T) {
 	abort_node(&exec, node)
 }
 
+@(test)
+test_fork :: proc(t: ^testing.T) {
+	exec: Executor
+	executor_init(&exec)
+	defer executor_destroy(&exec)
+
+	ctx: Test_Context
+	reset_context(&ctx)
+
+	// Seq [ Fork [ Seq [ Wait, Incr ] ], Complete ]
+	// Parent branch finishes instantly after Fork. Detached branch runs in background.
+	node := seq(
+		fork(seq(wait(0.1), run(increment_action, &ctx))),
+		run(complete_action, &ctx),
+	)
+	enqueue_node(&exec, node)
+
+	executor_step(&exec, 0.0)
+	testing.expect_value(t, ctx.was_completed, true) // Parent branch done
+	testing.expect_value(t, ctx.action_count, 0)     // Detached branch still waiting
+
+	executor_step(&exec, 0.11)
+	testing.expect_value(t, ctx.action_count, 1)     // Detached branch finished
+}
+
+@(test)
+test_wait_forever :: proc(t: ^testing.T) {
+	exec: Executor
+	executor_init(&exec)
+	defer executor_destroy(&exec)
+
+	ctx: Test_Context
+	reset_context(&ctx)
+
+	// Race: 0.1s wait vs Forever. 0.1s should always win.
+	node := seq(race(wait(0.1), wait_forever()), run(complete_action, &ctx))
+	enqueue_node(&exec, node)
+
+	executor_step(&exec, 0.05)
+	testing.expect_value(t, ctx.was_completed, false)
+
+	executor_step(&exec, 0.1)
+	testing.expect_value(t, ctx.was_completed, true)
+}
+
+@(test)
+test_weak_guard :: proc(t: ^testing.T) {
+	exec: Executor
+	executor_init(&exec)
+	defer executor_destroy(&exec)
+
+	ctx: Test_Context
+	reset_context(&ctx)
+
+	alive := true
+	is_valid :: proc(data: rawptr) -> bool { return (^bool)(data)^ }
+
+	// Weak wraps an action. If 'alive' becomes false, Weak should abort child and fail.
+	node := seq(weak(wait(1.0), is_valid, &alive), run(complete_action, &ctx))
+	enqueue_node(&exec, node)
+
+	executor_step(&exec, 0.1)
+	testing.expect_value(t, ctx.was_completed, false)
+
+	alive = false
+	executor_step(&exec, 0.1)
+	// Sequence should have failed because Weak failed, so complete_action never runs.
+	testing.expect_value(t, ctx.was_completed, false)
+}
