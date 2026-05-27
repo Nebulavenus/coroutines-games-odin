@@ -65,7 +65,7 @@ Projectile :: struct {
 Pop_Effect :: struct {
 	pos:    [2]f32,
 	radius: f32,
-	ended: bool,
+	ended:  bool,
 }
 
 Game_World :: struct {
@@ -73,7 +73,7 @@ Game_World :: struct {
 	enemies:             [dynamic]Enemy,
 	gems:                [dynamic][2]f32,
 	projectiles:         [dynamic]Projectile,
-	pop_effects:         [dynamic]Pop_Effect,
+	pop_effects:         [dynamic]^Pop_Effect,
 	exec:                Executor, // Pauses with game
 	sys_exec:            Executor, // Runs in real-time
 	charge_semaphore:    Semaphore,
@@ -177,25 +177,24 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 
 // Visual "Pop" effect (Spawned via Fork)
 death_pop_behavior :: proc(game: ^Game_World, pos: [2]f32) -> ^Node {
-	idx, _ := append(&game.pop_effects, Pop_Effect {
-		pos = pos,
-		ended = false,
-		radius = 0.0,
-	})
-	if len(game.pop_effects) == 0 { return nop() }
-	pop_effect := &game.pop_effects[idx-1]
-	radius := &pop_effect.radius
-	return fork(
+	p := new(Pop_Effect, game.sys_exec.allocator)
+	p.pos = pos
+	p.ended = false
+	p.radius = 0.0
+
+	append(&game.pop_effects, p)
+
+	return managed(fork(
 			seq(
-				tween(0.0, 30.0, 0.8, radius, ease_in_out_elastic),
-				tween(30.0, 0.0, 0.4, radius, ease_in_out_cubic),
+				tween(0.0, 30.0, 0.8, &p.radius, ease_in_out_elastic),
+				tween(30.0, 0.0, 0.4, &p.radius, ease_in_out_cubic),
 				run(proc(data: rawptr) -> bool {
 					p := (^Pop_Effect)(data)
 					p.ended = true
 					return true
-				}, pop_effect)
+				}, p)
 			),
-		)
+		), p, game.sys_exec.allocator)
 }
 
 whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
