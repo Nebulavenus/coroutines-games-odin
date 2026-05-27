@@ -342,7 +342,7 @@ test_wait_until_with_zero_dt :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_select_blocking_on_running :: proc(t: ^testing.T) {
+test_wait_frames :: proc(t: ^testing.T) {
 	exec: Executor
 	executor_init(&exec)
 	defer executor_destroy(&exec)
@@ -350,19 +350,91 @@ test_select_blocking_on_running :: proc(t: ^testing.T) {
 	ctx: Test_Context
 	reset_context(&ctx)
 
-	condition := false
-	check_cond :: proc(data: rawptr) -> bool {
-		return (^bool)(data)^
-	}
+	node := seq(wait_frames(3), run(complete_action, &ctx))
+	enqueue_node(&exec, node)
 
-	// First branch blocks on wait_until. Select should NOT fallback while branch is Running.
-	node := select(seq(wait_until(check_cond, &condition), run(increment_action, &ctx)), run(increment_action, &ctx))
+	executor_step(&exec, 0.0) // Frame 1
+	testing.expect_value(t, ctx.was_completed, false)
+
+	executor_step(&exec, 0.0) // Frame 2
+	testing.expect_value(t, ctx.was_completed, false)
+
+	executor_step(&exec, 0.0) // Frame 3
+	testing.expect_value(t, ctx.was_completed, true)
+}
+
+@(test)
+test_capture_return :: proc(t: ^testing.T) {
+	exec: Executor
+	executor_init(&exec)
+	defer executor_destroy(&exec)
+
+	res: bool
+	node := capture_return(run(proc(_: rawptr) -> bool {return false}), &res)
 	enqueue_node(&exec, node)
 
 	executor_step(&exec, 0.0)
-	testing.expect_value(t, ctx.action_count, 0)
+	testing.expect_value(t, res, false)
 
-	condition = true
+	res = false
+	node2 := capture_return(run(proc(_: rawptr) -> bool {return true}), &res)
+	enqueue_node(&exec, node2)
+
 	executor_step(&exec, 0.0)
-	testing.expect_value(t, ctx.action_count, 1)
+	testing.expect_value(t, res, true)
 }
+
+@(test)
+test_optional_sequence :: proc(t: ^testing.T) {
+	exec: Executor
+	executor_init(&exec)
+	defer executor_destroy(&exec)
+
+	ctx: Test_Context
+	reset_context(&ctx)
+
+	// Optional sequence should NOT stop on failure
+	node := optional_seq(
+		run(increment_action, &ctx),
+		run(proc(_: rawptr) -> bool {return false}), 	// Fail
+		run(increment_action, &ctx),
+	)
+	enqueue_node(&exec, node)
+
+	executor_step(&exec, 0.0)
+	testing.expect_value(t, ctx.action_count, 2)
+}
+
+@(test)
+test_semaphore_scope :: proc(t: ^testing.T) {
+	exec: Executor
+	executor_init(&exec)
+	defer executor_destroy(&exec)
+
+	sem: Semaphore
+	semaphore_init(&sem, 1)
+	defer semaphore_destroy(&sem)
+
+	ctx1, ctx2: Test_Context
+	reset_context(&ctx1)
+	reset_context(&ctx2)
+
+	// Two nodes trying to enter a semaphore with max_active=1
+	node1 := semaphore_scope(&sem, seq(wait(0.1), run(complete_action, &ctx1)))
+	node2 := semaphore_scope(&sem, run(complete_action, &ctx2))
+
+	enqueue_node(&exec, node1)
+	enqueue_node(&exec, node2)
+
+	executor_step(&exec, 0.0)
+	// node1 acquired, node2 is queued
+	testing.expect_value(t, sem.current_active, 1)
+	testing.expect_value(t, ctx1.was_completed, false)
+	testing.expect_value(t, ctx2.was_completed, false)
+
+	executor_step(&exec, 0.11)
+	// node1 completed and released semaphore, node2 acquired and completed immediately
+	testing.expect_value(t, ctx1.was_completed, true)
+	testing.expect_value(t, ctx2.was_completed, true)
+}
+

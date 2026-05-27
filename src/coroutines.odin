@@ -1,5 +1,6 @@
 package main
 
+import "core:math"
 import "core:mem"
 
 Status :: enum {
@@ -428,10 +429,35 @@ sync_vtable := Node_VTable {
 	},
 }
 
+Ease_Proc :: proc(t: f32) -> f32
+
+ease_linear :: proc(t: f32) -> f32 {
+	return t
+}
+
+ease_in_out_cubic :: proc(t: f32) -> f32 {
+	if t < 0.5 {
+		return 4.0 * t * t * t
+	}
+	return 1.0 - math.pow(f32(-2.0 * t + 2.0), 3.0) / 2.0
+}
+
+ease_in_out_elastic :: proc(t: f32) -> f32 {
+	c5: f32 = (2.0 * math.PI) / 4.5
+	if t == 0.0 do return 0.0
+	if t == 1.0 do return 1.0
+
+	if t < 0.5 {
+		return -(math.pow(f32(2.0), 20.0 * t - 10.0) * math.sin((20.0 * t - 11.125) * c5)) / 2.0
+	}
+	return (math.pow(f32(2.0), -20.0 * t + 10.0) * math.sin((20.0 * t - 11.125) * c5)) / 2.0 + 1.0
+}
+
 Tween_Node :: struct {
 	using node:                               Node,
 	start_val, target_val, duration, elapsed: f32,
 	output:                                   ^f32,
+	ease:                                     Ease_Proc,
 }
 
 tween_vtable := Node_VTable {
@@ -442,7 +468,8 @@ tween_vtable := Node_VTable {
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
 		t := (^Tween_Node)(self); t.elapsed += dt
 		alpha := clamp(t.elapsed / t.duration, 0.0, 1.0)
-		t.output^ = t.start_val + (t.target_val - t.start_val) * alpha
+		e_alpha := t.ease != nil ? t.ease(alpha) : alpha
+		t.output^ = t.start_val + (t.target_val - t.start_val) * e_alpha
 		return t.elapsed >= t.duration ? .Completed : .Running
 	},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {},
@@ -560,6 +587,185 @@ catch_vtable := Node_VTable {
 	},
 }
 
+Wait_Frames_Node :: struct {
+	using node:     Node,
+	target_frames:  int,
+	elapsed_frames: int,
+}
+
+wait_frames_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		w := (^Wait_Frames_Node)(self)
+		w.elapsed_frames = 0
+		return w.target_frames <= 0 ? .Completed : .Running
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
+		w := (^Wait_Frames_Node)(self)
+		w.elapsed_frames += 1
+		return w.elapsed_frames >= w.target_frames ? .Completed : .Running
+	},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {},
+	on_child_stopped = proc(
+		self: ^Node,
+		exec: ^Executor,
+		status: Status,
+		child: ^Node,
+	) -> Status {return .Failed},
+	destroy = proc(self: ^Node, allocator: mem.Allocator) {free(self, allocator)},
+}
+
+Capture_Return_Node :: struct {
+	using node: Node,
+	child:      ^Node,
+	output:     ^bool,
+}
+
+capture_return_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		c := (^Capture_Return_Node)(self)
+		enqueue_node(exec, c.child, c)
+		return .Suspended
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Suspended},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {
+		c := (^Capture_Return_Node)(self)
+		if status == .Aborted && (c.child.status == .Running || c.child.status == .Suspended) {
+			abort_node(exec, c.child)
+		}
+	},
+	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
+		c := (^Capture_Return_Node)(self)
+		c.output^ = (status == .Completed)
+		return .Completed
+	},
+	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+		c := (^Capture_Return_Node)(self)
+		destroy_node(c.child, allocator)
+		free(c, allocator)
+	},
+}
+
+Optional_Sequence_Node :: struct {
+	using node:  Node,
+	children:    [dynamic]^Node,
+	child_index: int,
+}
+
+optional_seq_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		s := (^Optional_Sequence_Node)(self)
+		if len(s.children) == 0 do return .Completed
+		s.child_index = 0
+		enqueue_node(exec, s.children[s.child_index], s)
+		return .Suspended
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Suspended},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {
+		s := (^Optional_Sequence_Node)(self)
+		if status == .Aborted && s.child_index < len(s.children) {
+			abort_node(exec, s.children[s.child_index])
+		}
+	},
+	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
+		s := (^Optional_Sequence_Node)(self)
+		s.child_index += 1
+		if s.child_index >= len(s.children) do return .Completed
+		enqueue_node(exec, s.children[s.child_index], s)
+		return .Suspended
+	},
+	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+		s := (^Optional_Sequence_Node)(self)
+		for c in s.children do destroy_node(c, allocator)
+		delete(s.children); free(s, allocator)
+	},
+}
+
+Semaphore :: struct {
+	max_active:     int,
+	current_active: int,
+	queued:         [dynamic]^Semaphore_Handler_Node,
+}
+
+Semaphore_Handler_Node :: struct {
+	using node: Node,
+	child:      ^Node,
+	sem:        ^Semaphore,
+	acquired:   bool,
+	exec:       ^Executor,
+}
+
+semaphore_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		s := (^Semaphore_Handler_Node)(self)
+		s.exec = exec
+
+		if s.sem.current_active < s.sem.max_active {
+			s.sem.current_active += 1
+			s.acquired = true
+			enqueue_node(exec, s.child, s)
+			return .Suspended
+		}
+
+		append(&s.sem.queued, s)
+		return .Suspended
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Suspended},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {
+		s := (^Semaphore_Handler_Node)(self)
+		if status == .Aborted {
+			if s.acquired {
+				semaphore_release(s.sem)
+			} else {
+				for i := 0; i < len(s.sem.queued); i += 1 {
+					if s.sem.queued[i] == s {
+						unordered_remove(&s.sem.queued, i)
+						break
+					}
+				}
+			}
+			if s.child.status == .None ||
+			   s.child.status == .Running ||
+			   s.child.status == .Suspended {
+				abort_node(exec, s.child)
+			}
+		}
+	},
+	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
+		s := (^Semaphore_Handler_Node)(self)
+		if s.acquired {
+			semaphore_release(s.sem)
+			s.acquired = false
+		}
+		return status
+	},
+	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+		s := (^Semaphore_Handler_Node)(self)
+		destroy_node(s.child, allocator)
+		free(s, allocator)
+	},
+}
+
+semaphore_init :: proc(sem: ^Semaphore, max_active: int, allocator := context.allocator) {
+	sem.max_active = max_active
+	sem.current_active = 0
+	sem.queued = make([dynamic]^Semaphore_Handler_Node, allocator)
+}
+
+semaphore_destroy :: proc(sem: ^Semaphore) {
+	delete(sem.queued)
+}
+
+semaphore_release :: proc(sem: ^Semaphore) {
+	if len(sem.queued) > 0 {
+		next := sem.queued[0]
+		ordered_remove(&sem.queued, 0)
+		next.acquired = true
+		enqueue_node(next.exec, next.child, next)
+	} else {
+		sem.current_active = max(0, sem.current_active - 1)
+	}
+}
+
 // api
 
 seq :: proc(nodes: ..^Node, allocator := context.allocator) -> ^Node {
@@ -618,11 +824,12 @@ loop :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 tween :: proc(
 	start, target, duration: f32,
 	output: ^f32,
+	ease: Ease_Proc = nil,
 	allocator := context.allocator,
 ) -> ^Node {
 	node := new(Tween_Node, allocator); node.base = &tween_vtable
 	node.start_val =
-		start; node.target_val = target; node.duration = duration; node.output = output
+		start; node.target_val = target; node.duration = duration; node.output = output; node.ease = ease
 	node.name = "Tween"; return node
 }
 
@@ -665,5 +872,53 @@ not :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 catch :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 	node := new(Catch_Node, allocator); node.base = &catch_vtable; node.child = child
 	node.name = "Catch"; return node
+}
+
+wait_frames :: proc(frames: int, allocator := context.allocator) -> ^Node {
+	node := new(Wait_Frames_Node, allocator)
+	node.base = &wait_frames_vtable
+	node.target_frames = frames
+	node.name = "WaitFrames"
+	return node
+}
+
+capture_return :: proc(child: ^Node, output_ptr: ^bool, allocator := context.allocator) -> ^Node {
+	node := new(Capture_Return_Node, allocator)
+	node.base = &capture_return_vtable
+	node.child = child
+	node.output = output_ptr
+	node.name = "CaptureReturn"
+	return node
+}
+
+optional_seq :: proc(nodes: ..^Node, allocator := context.allocator) -> ^Node {
+	node := new(Optional_Sequence_Node, allocator)
+	node.base = &optional_seq_vtable
+	node.children = make([dynamic]^Node, allocator)
+	for n in nodes do append(&node.children, n)
+	node.name = "OptionalSequence"
+	return node
+}
+
+loop_seq :: proc(nodes: ..^Node, allocator := context.allocator) -> ^Node {
+	return loop(seq(..nodes, allocator = allocator), allocator = allocator)
+}
+
+semaphore_scope :: proc(sem: ^Semaphore, child: ^Node, allocator := context.allocator) -> ^Node {
+	node := new(Semaphore_Handler_Node, allocator)
+	node.base = &semaphore_vtable
+	node.child = child
+	node.sem = sem
+	node.acquired = false
+	node.name = "Semaphore"
+	return node
+}
+
+nop :: proc(allocator := context.allocator) -> ^Node {
+	return run(proc(_: rawptr) -> bool {return true}, nil, allocator)
+}
+
+error_node :: proc(allocator := context.allocator) -> ^Node {
+	return run(proc(_: rawptr) -> bool {return false}, nil, allocator)
 }
 
