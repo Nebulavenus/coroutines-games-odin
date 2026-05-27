@@ -45,9 +45,10 @@ Weapon :: struct {
 }
 
 Projectile :: struct {
-	pos:   [2]f32,
-	dir:   [2]f32,
-	speed: f32,
+	pos:    [2]f32,
+	dir:    [2]f32,
+	speed:  f32,
+	damage: int,
 }
 
 Game_World :: struct {
@@ -62,6 +63,7 @@ Game_World :: struct {
 	player_damage_timer: f32,
 	camera_shake:        f32,
 	level_up_scale:      f32,
+	boss_spawned_at:     int, // level when last boss spawned
 }
 
 apply_camera_shake :: proc(game: ^Game_World, amount: f32) -> ^Node {
@@ -90,7 +92,7 @@ super_attack_behavior :: proc(game: ^Game_World) -> ^Node {
 					dir := [2]f32{math.cos(angle), math.sin(angle)}
 					append(
 						&gw.projectiles,
-						Projectile{pos = gw.player.pos, dir = dir, speed = 400.0},
+						Projectile{pos = gw.player.pos, dir = dir, speed = 400.0, damage = 50},
 					)
 				}
 				return true
@@ -100,65 +102,72 @@ super_attack_behavior :: proc(game: ^Game_World) -> ^Node {
 
 // attacks enemies in area with intervals
 whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
+
+	Weapon_Payload :: struct {
+		game:   ^Game_World,
+		weapon: ^Weapon,
+	}
+
+	payload := new(Weapon_Payload)
+	payload.game = game
+	payload.weapon = weapon
+
 	return loop(
 		seq(
-			wait(weapon.cooldown), // delay between attacks
-
+			wait_ptr(&weapon.cooldown), // delay between attacks (dynamic)
 			// animation and damage
-			run(
-				proc(data: rawptr) -> bool {
-					gw := (^Game_World)(data)
+			run(proc(data: rawptr) -> bool {
+					p := (^Weapon_Payload)(data)
 
-					for &enemy in gw.enemies {
-						dist := linalg.distance(enemy.pos, gw.player.pos)
+					for &enemy in p.game.enemies {
+						dist := linalg.distance(enemy.pos, p.game.player.pos)
 						if dist < 120.0 {
-							enemy.health -= 15
+							enemy.health -= p.weapon.damage
 						}
 					}
-					gw.player.whip_flash_timer = 0.15 // flash duration
+					p.game.player.whip_flash_timer = 0.15
 					return true
-				},
-				game,
-			),
+				}, payload),
 		),
 	)
 }
 
 // every few seconds fires fireball to nearest enemy
 fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
+
+	Weapon_Payload :: struct {
+		game:   ^Game_World,
+		weapon: ^Weapon,
+	}
+
+	payload := new(Weapon_Payload)
+	payload.game = game
+	payload.weapon = weapon
+
 	return loop(
 		seq(
-			wait(weapon.cooldown), // delay between attacks
+			wait_ptr(&weapon.cooldown), // delay between attacks (dynamic)
+			run(proc(data: rawptr) -> bool {
+					p := (^Weapon_Payload)(data)
+					if len(p.game.enemies) == 0 do return true
 
-			// animation and damage
-			run(
-				proc(data: rawptr) -> bool {
-					gw := (^Game_World)(data)
-					if len(gw.enemies) == 0 do return true
-
-					// find nearest enemy
 					nearest_index := 0
 					min_dist := f32(99999.0)
-					for enemy, i in gw.enemies {
-						dist := linalg.distance(enemy.pos, gw.player.pos)
+					for enemy, i in p.game.enemies {
+						dist := linalg.distance(enemy.pos, p.game.player.pos)
 						if dist < min_dist {
 							min_dist = dist
 							nearest_index = i
 						}
 					}
 
-					dir := gw.enemies[nearest_index].pos - gw.player.pos
+					dir := p.game.enemies[nearest_index].pos - p.game.player.pos
 					if linalg.length(dir) > 0 {
 						dir = linalg.normalize(dir)
-						append(
-							&gw.projectiles,
-							Projectile{pos = gw.player.pos, dir = dir, speed = 280.0},
-						)
+						append(&p.game.projectiles, Projectile{pos = p.game.player.pos, dir = dir, speed = 280.0, damage = p.weapon.damage})
 					}
 					return true
-				},
-				game,
-			),
+				}, payload),
 		),
 	)
 }
@@ -181,11 +190,12 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 
 	spawn_boss :: proc(data: rawptr) -> bool {
 		gw := (^Game_World)(data)
+		gw.boss_spawned_at = gw.player.level
 		append(
 			&gw.enemies,
 			Enemy{pos = gw.player.pos + {0, -200}, health = 250, speed = 50.0, is_boss = true},
 		)
-		enqueue_node(&gw.exec, apply_camera_shake(gw, 10.0))
+		enqueue_node(&gw.sys_exec, apply_camera_shake(gw, 10.0))
 		return true
 	}
 
@@ -194,28 +204,24 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 			select(
 				seq(
 					check(
-						proc(data: rawptr) -> bool { 	// Select - try to spawn boss if level is high, otherwise normal wave
+						proc(data: rawptr) -> bool {
 							gw := (^Game_World)(data)
-							return gw.player.level % 3 == 0
+							// spawn boss every 5 levels, only once per level
+							return(
+								gw.player.level > 0 &&
+								gw.player.level % 5 == 0 &&
+								gw.boss_spawned_at != gw.player.level \
+							)
 						},
 						game,
 					),
 					run(spawn_boss, game),
 					wait(10.0),
 				),
-				seq(
-					race(
-						wait(3.0),
-						wait_until(
-							proc(data: rawptr) -> bool { 	// Race - Wait for 3 seconds or until player health is low
+				seq(race(wait(3.0), wait_until(proc(data: rawptr) -> bool {
 								gw := (^Game_World)(data)
 								return gw.player.health < 20
-							},
-							game,
-						),
-					),
-					run(spawn_skeleton_wave, game),
-				),
+							}, game)), run(spawn_skeleton_wave, game)),
 			),
 		),
 	)
@@ -233,43 +239,61 @@ level_up_sequence :: proc(game: ^Game_World) -> ^Node {
 			game,
 		),
 		tween(0.0, 1.0, 0.4, &game.level_up_scale),
-		// upgrade ui, wait for input
-		wait_until(
-			proc(data: rawptr) -> bool {
+		wait_until(proc(data: rawptr) -> bool {
 				gw := (^Game_World)(data)
 
-				// pressed [1] cooldown upgrade
 				if rl.IsKeyPressed(.ONE) {
 					for &weapon in gw.player.weapons {
-						if weapon.name == "Whip" {
-							weapon.cooldown = math.max(0.4, weapon.cooldown - 0.25)
-						}
+						weapon.cooldown = math.max(0.2, weapon.cooldown * 0.8)
 					}
 					return true
 				}
-				// pressed [2] health recovery upgrade
 				if rl.IsKeyPressed(.TWO) {
-					gw.player.max_health += 30
+					for &weapon in gw.player.weapons {
+						weapon.damage += 10
+					}
+					gw.player.max_health += 20
 					gw.player.health = gw.player.max_health
 					return true
 				}
-				// pressed [3] special shield
 				if rl.IsKeyPressed(.THREE) {
 					enqueue_node(&gw.exec, shield_behavior(gw, 5.0))
 					return true
 				}
 				return false
-			},
-			game,
-		),
+			}, game),
 		tween(1.0, 0.0, 0.2, &game.level_up_scale),
-		// apply upgrade and resume game
 		run(proc(data: rawptr) -> bool {
 				gw := (^Game_World)(data)
 				gw.is_paused = false
 				return true
 			}, game),
 	)
+}
+
+regen_behavior :: proc(game: ^Game_World) -> ^Node {
+	return loop(seq(wait(2.0), not(check(proc(data: rawptr) -> bool {
+						gw := (^Game_World)(data)
+						for e in gw.enemies {
+							if linalg.distance(e.pos, gw.player.pos) < 150.0 do return true
+						}
+						return false
+					}, game)), run(proc(data: rawptr) -> bool {
+					gw := (^Game_World)(data)
+					gw.player.health = math.min(gw.player.max_health, gw.player.health + 5)
+					return true
+				}, game)))
+}
+
+pulse_behavior :: proc(game: ^Game_World) -> ^Node {
+	return loop(seq(wait(1.2), catch(seq(check(proc(_: rawptr) -> bool {return rand.float32() > 0.3}), run(proc(data: rawptr) -> bool {
+							gw := (^Game_World)(data)
+							for &e in gw.enemies {
+								if linalg.distance(e.pos, gw.player.pos) < 180.0 do e.health -= 50
+							}
+							gw.player.whip_flash_timer = 0.2
+							return true
+						}, game)))))
 }
 
 main :: proc() {
@@ -317,8 +341,9 @@ main :: proc() {
 		executor_destroy(&gw.sys_exec)
 	}
 
-	gw.spawner_coro = spawner_behavior(&gw)
-	enqueue_node(&gw.exec, gw.spawner_coro)
+	enqueue_node(&gw.exec, spawner_behavior(&gw))
+	enqueue_node(&gw.exec, regen_behavior(&gw))
+	enqueue_node(&gw.exec, pulse_behavior(&gw))
 
 	// Player weapons
 	whip := new(Weapon)
@@ -360,13 +385,8 @@ main :: proc() {
 				enqueue_node(&gw.exec, super_attack_behavior(&gw))
 			}
 
-			if gw.player.whip_flash_timer > 0.0 {
-				gw.player.whip_flash_timer -= dt
-			}
-
-			if gw.player_damage_timer > 0.0 {
-				gw.player_damage_timer -= dt
-			}
+			if gw.player.whip_flash_timer > 0.0 do gw.player.whip_flash_timer -= dt
+			if gw.player_damage_timer > 0.0 do gw.player_damage_timer -= dt
 
 			// update enemies
 			for i := len(gw.enemies) - 1; i >= 0; i -= 1 {
@@ -399,18 +419,16 @@ main :: proc() {
 				hit := false
 				for &enemy in gw.enemies {
 					if linalg.distance(proj.pos, enemy.pos) < 20.0 {
-						enemy.health -= 25
+						enemy.health -= proj.damage
 						hit = true
 						break
 					}
 				}
-
-				offscreen :=
-					proj.pos.x < -10 ||
-					proj.pos.x > W_WIDTH + 10 ||
-					proj.pos.y < -10 ||
-					proj.pos.y > W_HEIGHT + 10
-				if hit || offscreen {
+				if hit ||
+				   proj.pos.x < -10 ||
+				   proj.pos.x > W_WIDTH + 10 ||
+				   proj.pos.y < -10 ||
+				   proj.pos.y > W_HEIGHT + 10 {
 					unordered_remove(&gw.projectiles, i)
 				}
 			}
@@ -432,7 +450,7 @@ main :: proc() {
 						if gw.player.xp >= gw.player.xp_needed {
 							gw.player.xp -= gw.player.xp_needed
 							gw.player.level += 1
-							gw.player.xp_needed = int(f32(gw.player.xp_needed) * 1.6)
+							gw.player.xp_needed = int(f32(gw.player.xp_needed) * 1.5)
 							enqueue_node(&gw.sys_exec, level_up_sequence(&gw))
 						}
 					}
@@ -456,13 +474,8 @@ main :: proc() {
 
 		for gem in gw.gems {
 			rl.DrawRectanglePro(
-				rl.Rectangle {
-					x = gem.x + shake_offset.x,
-					y = gem.y + shake_offset.y,
-					width = 8,
-					height = 8,
-				},
-				rl.Vector2{4, 4},
+				rl.Rectangle{gem.x + shake_offset.x, gem.y + shake_offset.y, 8, 8},
+				{4, 4},
 				45.0,
 				rl.SKYBLUE,
 			)
@@ -470,53 +483,48 @@ main :: proc() {
 
 		for enemy in gw.enemies {
 			color := enemy.is_boss ? rl.MAROON : rl.RED
-			radius := f32(enemy.is_boss ? 18.0 : 10.0)
-			rl.DrawCircleV(cast(rl.Vector2)(enemy.pos + shake_offset), radius, color)
-		}
-
-		for proj in gw.projectiles {
-			rl.DrawCircleV(cast(rl.Vector2)(proj.pos + shake_offset), 5.0, rl.ORANGE)
-		}
-
-		player_color := gw.player_damage_timer > 0.0 ? rl.ORANGE : rl.GREEN
-		rl.DrawCircleV(cast(rl.Vector2)(gw.player.pos + shake_offset), 12.0, player_color)
-
-		if gw.player.shield_active {
-			rl.DrawCircleLinesV(cast(rl.Vector2)(gw.player.pos + shake_offset), 20.0, rl.SKYBLUE)
-		}
-
-		if gw.player.whip_flash_timer > 0.0 {
-			rl.DrawCircleLinesV(
-				cast(rl.Vector2)(gw.player.pos + shake_offset),
-				120.0,
-				rl.Fade(rl.LIGHTGRAY, 0.4),
+			rl.DrawCircleV(
+				cast(rl.Vector2)(enemy.pos + shake_offset),
+				enemy.is_boss ? 18 : 10,
+				color,
 			)
 		}
+		for proj in gw.projectiles do rl.DrawCircleV(cast(rl.Vector2)(proj.pos + shake_offset), 5, rl.ORANGE)
 
-		hud_y := i32(10)
+		player_color := gw.player_damage_timer > 0.0 ? rl.ORANGE : rl.GREEN
+		rl.DrawCircleV(cast(rl.Vector2)(gw.player.pos + shake_offset), 12, player_color)
+		if gw.player.shield_active do rl.DrawCircleLinesV(cast(rl.Vector2)(gw.player.pos + shake_offset), 20, rl.SKYBLUE)
+		if gw.player.whip_flash_timer > 0.0 do rl.DrawCircleLinesV(cast(rl.Vector2)(gw.player.pos + shake_offset), 120, rl.Fade(rl.LIGHTGRAY, 0.4))
+
 		rl.DrawText(
 			rl.TextFormat("HP: %d/%d", gw.player.health, gw.player.max_health),
 			10,
-			hud_y,
+			10,
 			16,
 			rl.WHITE,
 		)
-		rl.DrawText(rl.TextFormat("Level: %d", gw.player.level), 160, hud_y, 16, rl.GOLD)
+		rl.DrawText(rl.TextFormat("Level: %d", gw.player.level), 160, 10, 16, rl.GOLD)
 		rl.DrawText(
 			rl.TextFormat("XP: %d/%d", gw.player.xp, gw.player.xp_needed),
 			280,
-			hud_y,
+			10,
 			16,
 			rl.SKYBLUE,
 		)
 		rl.DrawText(
 			rl.TextFormat("Active Enemies: %d", len(gw.enemies)),
 			440,
-			hud_y,
+			10,
 			16,
 			rl.LIGHTGRAY,
 		)
-		rl.DrawText("SPACE for Super Attack", 10, W_HEIGHT - 30, 16, rl.DARKGRAY)
+		rl.DrawText(
+			"SPACE: Super Attack | NO ENEMIES: Regen HP",
+			10,
+			W_HEIGHT - 30,
+			16,
+			rl.DARKGRAY,
+		)
 
 		// Level Up Card Screen
 		if gw.is_paused {
@@ -525,28 +533,19 @@ main :: proc() {
 			card_y := f32(W_HEIGHT / 2 - 50) * gw.level_up_scale
 
 			rl.DrawText("LEVEL UP!", W_WIDTH / 2 - 70, i32(card_y - 100), 28, rl.YELLOW)
-			rl.DrawText(
-				"Choose an upgrade:",
-				W_WIDTH / 2 - 100,
-				i32(card_y - 50),
-				18,
-				rl.LIGHTGRAY,
-			)
 
-			rl.DrawRectangle(40, i32(card_y), 180, 100, rl.DARKGRAY)
-			rl.DrawRectangleLines(40, i32(card_y), 180, 100, rl.GOLD)
-			rl.DrawText("[1] Whip Spd", 50, i32(card_y + 15), 14, rl.GOLD)
-			rl.DrawText("Lower cooldown", 50, i32(card_y + 40), 16, rl.WHITE)
-
-			rl.DrawRectangle(230, i32(card_y), 180, 100, rl.DARKGRAY)
-			rl.DrawRectangleLines(230, i32(card_y), 180, 100, rl.GOLD)
-			rl.DrawText("[2] Vitality", 240, i32(card_y + 15), 14, rl.GOLD)
-			rl.DrawText("Heal + Max HP", 240, i32(card_y + 40), 16, rl.WHITE)
-
-			rl.DrawRectangle(420, i32(card_y), 180, 100, rl.DARKGRAY)
-			rl.DrawRectangleLines(420, i32(card_y), 180, 100, rl.GOLD)
-			rl.DrawText("[3] Shield", 430, i32(card_y + 15), 14, rl.GOLD)
-			rl.DrawText("5s Invincibility", 430, i32(card_y + 40), 16, rl.WHITE)
+			options := [3]string{"[1] Haste (Cooldown)", "[2] Power (Dmg + HP)", "[3] Shield (5s)"}
+			for opt, i in options {
+				rl.DrawRectangle(i32(40 + i * 190), i32(card_y), 180, 100, rl.DARKGRAY)
+				rl.DrawRectangleLines(i32(40 + i * 190), i32(card_y), 180, 100, rl.GOLD)
+				rl.DrawText(
+					rl.TextFormat("%s", opt),
+					i32(50 + i * 190),
+					i32(card_y + 40),
+					14,
+					rl.WHITE,
+				)
+			}
 		}
 
 		if gw.player.health <= 0 {

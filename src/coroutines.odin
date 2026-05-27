@@ -214,16 +214,19 @@ abort_node :: proc(exec: ^Executor, node: ^Node) {
 Wait_Node :: struct {
 	using node:        Node,
 	duration, elapsed: f32,
+	duration_ptr:      ^f32,
 }
 
 wait_vtable := Node_VTable {
 	start = proc(self: ^Node, exec: ^Executor) -> Status {
-		w := (^Wait_Node)(self); w.elapsed = 0; return w.duration <= 0 ? .Completed : .Running
+		w := (^Wait_Node)(self); w.elapsed = 0
+		dur := w.duration_ptr != nil ? w.duration_ptr^ : w.duration
+		return dur <= 0 ? .Completed : .Running
 	},
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
-		w := (^Wait_Node)(
-			self,
-		); w.elapsed += dt; return w.elapsed >= w.duration ? .Completed : .Running
+		w := (^Wait_Node)(self); w.elapsed += dt
+		dur := w.duration_ptr != nil ? w.duration_ptr^ : w.duration
+		return w.elapsed >= dur ? .Completed : .Running
 	},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {},
 	on_child_stopped = proc(
@@ -590,6 +593,11 @@ race :: proc(nodes: ..^Node, allocator := context.allocator) -> ^Node {
 wait :: proc(duration: f32, allocator := context.allocator) -> ^Node {
 	node := new(Wait_Node, allocator); node.base = &wait_vtable; node.duration = duration
 	node.name = "Wait"; return node
+}
+
+wait_ptr :: proc(duration: ^f32, allocator := context.allocator) -> ^Node {
+	node := new(Wait_Node, allocator); node.base = &wait_vtable; node.duration_ptr = duration
+	node.name = "WaitPtr"; return node
 }
 
 run :: proc(
