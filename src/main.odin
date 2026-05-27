@@ -17,7 +17,7 @@ NvOptimusEnablement: c.ulong = 1
 @(export, link_name = "AmdPowerXpressRequestingHighPerformance")
 AmdPowerXpressRequestingHighPerformance: i32 = 1
 
-W_WIDTH, W_HEIGHT :: 640, 480
+W_WIDTH, W_HEIGHT :: 1024, 768
 
 Enemy_Type :: enum {
 	Skeleton,
@@ -344,8 +344,8 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 	spawn :: proc(game: ^Game_World, type: Enemy_Type) {
 		game.enemy_id_counter += 1
 		angle := rand.float32_range(0, 2 * math.PI)
-		dist := f32(260.0)
-		if type == .Wizard do dist = 300.0
+		dist := f32(450.0)
+		if type == .Wizard do dist = 500.0
 
 		hp := 25
 		spd := f32(80.0)
@@ -353,9 +353,9 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 		case .Elite_Skeleton:
 			hp = 100; spd = 65.0
 		case .Wizard:
-			hp = 40; spd = 45.0; dist = 300.0
+			hp = 40; spd = 45.0; dist = 500.0
 		case .Boss:
-			hp = 600; spd = 50.0; dist = 220.0
+			hp = 600; spd = 50.0; dist = 400.0
 		case .Skeleton:
 		}
 
@@ -444,16 +444,16 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 
 	if !game.debug_visible do return
 
-	W_X :: 400
-	W_W :: 240
+	W_W :: 400
+	W_X :: W_WIDTH - W_W
 
 	rl.DrawRectangle(W_X, 0, W_W, W_HEIGHT, rl.Fade(rl.BLACK, 0.85))
 	rl.DrawRectangleLines(W_X, 0, W_W, W_HEIGHT, rl.DARKGRAY)
 
 	y: i32 = 45
-	rl.DrawText("COROUTINE DEBUGGER", W_X + 10, 10, 16, rl.GOLD)
-	rl.DrawText(game.debug_compact ? "MODE: COMPACT (F2)" : "MODE: FULL (F2)", W_X + 10, 26, 10, rl.GRAY)
-	if game.debug_paused do rl.DrawText("PAUSED (F3)", W_X + 120, 26, 10, rl.MAROON)
+	rl.DrawText("COROUTINE DEBUGGER", W_X + 10, 10, 18, rl.GOLD)
+	rl.DrawText(game.debug_compact ? "MODE: COMPACT (F2)" : "MODE: FULL (F2)", W_X + 10, 26, 12, rl.GRAY)
+	if game.debug_paused do rl.DrawText("PAUSED (F3)", W_X + 120, 26, 12, rl.MAROON)
 
 	// Scrolling
 	wheel := rl.GetMouseWheelMove()
@@ -472,7 +472,7 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 	}
 
 	if len(filter_str) > 0 {
-		rl.DrawText(rl.TextFormat("FILTER: %s", filter_str), W_X + 10, W_HEIGHT - 20, 10, rl.SKYBLUE)
+		rl.DrawText(rl.TextFormat("FILTER: %s", filter_str), W_X + 10, W_HEIGHT - 20, 12, rl.SKYBLUE)
 	}
 
 	// Simple key-based filtering
@@ -537,7 +537,7 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 				}
 
 				if y^ < W_HEIGHT - 30 {
-					rl.DrawText(text, 410 + indent, y^, 10, color)
+					rl.DrawText(text, W_X + 10 + indent, y^, 12, color)
 					y^ += 12
 				}
 			}
@@ -848,18 +848,18 @@ main :: proc() {
 			),
 			10,
 			10,
-			18,
+			20,
 			rl.WHITE,
 		)
 
 		rl.DrawText(
 			rl.TextFormat("Active Enemies: %d", len(gw.enemies)),
-			440,
+			i32(W_WIDTH - 200),
 			10,
-			16,
+			20,
 			rl.LIGHTGRAY,
 		)
-		rl.DrawText("SPACE: Super Attack", 10, W_HEIGHT - 30, 16, rl.DARKGRAY)
+		rl.DrawText("SPACE: Super Attack", 10, W_HEIGHT - 30, 20, rl.DARKGRAY)
 
 		// Level Up Screen
 		if gw.is_paused {
@@ -869,9 +869,9 @@ main :: proc() {
 
 			opts := [3]string{"[1] SPEED", "[2] POWER", "[3] SHIELD"}
 			for s, i in opts {
-				rl.DrawRectangle(i32(40 + i * 195), i32(y), 170, 80, rl.DARKGRAY)
-				rl.DrawRectangleLines(i32(40 + i * 195), i32(y), 170, 80, rl.GOLD)
-				rl.DrawText(rl.TextFormat("%s", s), i32(70 + i * 195), i32(y + 32), 16, rl.WHITE)
+				rl.DrawRectangle(i32(W_WIDTH / 2 - 300 + i * 210), i32(y), 180, 80, rl.DARKGRAY)
+				rl.DrawRectangleLines(i32(W_WIDTH / 2 - 300 + i * 210), i32(y), 180, 80, rl.GOLD)
+				rl.DrawText(rl.TextFormat("%s", s), i32(W_WIDTH / 2 - 270 + i * 210), i32(y + 32), 16, rl.WHITE)
 			}
 		}
 
