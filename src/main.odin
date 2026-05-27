@@ -114,6 +114,7 @@ wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 			run(proc(d: rawptr) -> bool {
 				p := (^Payload)(d)
 				e := find_enemy(p.game, p.id)
+				if e == nil do return true
 				dir := linalg.normalize(p.game.player.pos - e.pos)
 				append(
 					&p.game.projectiles,
@@ -150,6 +151,7 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 				run(proc(d: rawptr) -> bool { // start charge
 					p := (^Payload)(d)
 					e := find_enemy(p.game, p.id)
+					if e == nil do return true
 					e.speed *= 3.5
 					e.is_charging = true
 					return true
@@ -158,6 +160,7 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 				run(proc(d: rawptr) -> bool { // stop it
 					p := (^Payload)(d)
 					e := find_enemy(p.game, p.id)
+					if e == nil do return true
 					e.speed /= 3.5
 					e.is_charging = false
 					return true
