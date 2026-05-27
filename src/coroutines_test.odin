@@ -438,3 +438,23 @@ test_semaphore_scope :: proc(t: ^testing.T) {
 	testing.expect_value(t, ctx2.was_completed, true)
 }
 
+@(test)
+test_managed_node :: proc(t: ^testing.T) {
+	exec: Executor
+	executor_init(&exec)
+	defer executor_destroy(&exec)
+
+	// Allocate a payload
+	payload := new(int)
+	payload^ = 42
+
+	// Wrap in a managed node
+	node := managed(wait(1.0), payload)
+	enqueue_node(&exec, node)
+
+	executor_step(&exec, 0.1)
+
+	// Abort the node. The Managed_Node's destroy should free the payload.
+	abort_node(&exec, node)
+}
+

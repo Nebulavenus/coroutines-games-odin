@@ -88,47 +88,53 @@ find_enemy :: proc(game: ^Game_World, id: int) -> ^Enemy {
 
 // Ranged attack for Wizard
 wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
-	// Simple struct for local coro state
+	// Local coro state
 	Payload :: struct {
 		game: ^Game_World,
 		id:   int,
 	}
-	p := new_clone(Payload{game, enemy_id})
+	p := new(Payload)
+	p.game = game
+	p.id = enemy_id
 
-	return seq(
-		sync(
-			run(
-				proc(data: rawptr) -> bool { 	// Telegraph phase
+	// Wrap in managed so that payload p is freed automatically
+	return managed(
+		seq(
+			sync(
+				run(
+					proc(data: rawptr) -> bool { 	// Telegraph phase
+						p := (^Payload)(data)
+						if e := find_enemy(p.game, p.id); e != nil {
+							e.telegraph_timer = 0.8
+							return true
+						}
+						return false
+					},
+					p,
+				),
+				wait(0.8),
+			),
+			// Shoot phase
+			run(proc(data: rawptr) -> bool {
 					p := (^Payload)(data)
 					if e := find_enemy(p.game, p.id); e != nil {
-						e.telegraph_timer = 0.8
+						dir := linalg.normalize(p.game.player.pos - e.pos)
+						append(
+							&p.game.projectiles,
+							Projectile {
+								pos = e.pos,
+								dir = dir,
+								speed = 240.0,
+								damage = 15,
+								is_enemy_projectile = true,
+							},
+						)
 						return true
 					}
 					return false
-				},
-				p,
-			),
-			wait(0.8),
+				}, p),
 		),
-		// Shoot phase
-		run(proc(data: rawptr) -> bool {
-				p := (^Payload)(data)
-				if e := find_enemy(p.game, p.id); e != nil {
-					dir := linalg.normalize(p.game.player.pos - e.pos)
-					append(
-						&p.game.projectiles,
-						Projectile {
-							pos = e.pos,
-							dir = dir,
-							speed = 240.0,
-							damage = 15,
-							is_enemy_projectile = true,
-						},
-					)
-					return true
-				}
-				return false
-			}, p),
+		p,
 	)
 }
 
@@ -138,36 +144,40 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 		game: ^Game_World,
 		id:   int,
 	}
-	p := new_clone(Payload{game, enemy_id})
+	p := new(Payload)
+	p.game = game
+	p.id = enemy_id
 
-	return semaphore_scope(
-		&game.charge_semaphore,
-		seq(
-			run(
-				proc(data: rawptr) -> bool { 	// Start Charge
-					p := (^Payload)(data)
-					if e := find_enemy(p.game, p.id); e != nil {
-						e.speed *= 3.5
-						e.is_charging = true
-						return true
-					}
-					return false
-				},
-				p,
+	return managed(
+		semaphore_scope(
+			&game.charge_semaphore,
+			seq(
+				run(
+					proc(data: rawptr) -> bool { 	// Start Charge
+						p := (^Payload)(data)
+						if e := find_enemy(p.game, p.id); e != nil {
+							e.speed *= 3.5
+							e.is_charging = true
+							return true
+						}
+						return false
+					},
+					p,
+				),
+				wait(1.0),
+				// Stop Charge
+				run(proc(data: rawptr) -> bool {
+						p := (^Payload)(data)
+						if e := find_enemy(p.game, p.id); e != nil {
+							e.speed /= 3.5
+							e.is_charging = false
+							return true
+						}
+						return false
+					}, p),
 			),
-			wait(1.0),
-			// Stop Charge
-			run(proc(data: rawptr) -> bool {
-					p := (^Payload)(data)
-					if e := find_enemy(p.game, p.id); e != nil {
-						e.speed /= 3.5
-						e.is_charging = false
-						return true
-					}
-					return false
-				}, p),
-			run(proc(data: rawptr) -> bool {free(data); return true}, p),
 		),
+		p,
 	)
 }
 
@@ -182,16 +192,18 @@ whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 	payload.game = game
 	payload.weapon = weapon
 
-	return loop(seq(wait_ptr(&weapon.cooldown), run(proc(data: rawptr) -> bool {
-					p := (^Weapon_Payload)(data)
-					for &e in p.game.enemies {
-						if linalg.distance(e.pos, p.game.player.pos) < 110.0 {
-							e.health -= p.weapon.damage
+	// managed() wraps the whole loop. When weapon is removed, this entire node is aborted
+	// and its payload is automatically freed.
+	return managed(loop(seq(wait_ptr(&weapon.cooldown), run(proc(data: rawptr) -> bool {
+						p := (^Weapon_Payload)(data)
+						for &e in p.game.enemies {
+							if linalg.distance(e.pos, p.game.player.pos) < 110.0 {
+								e.health -= p.weapon.damage
+							}
 						}
-					}
-					p.game.player.whip_flash_timer = 0.15
-					return true
-				}, payload)))
+						p.game.player.whip_flash_timer = 0.15
+						return true
+					}, payload))), payload)
 }
 
 fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
@@ -205,24 +217,24 @@ fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 	payload.game = game
 	payload.weapon = weapon
 
-	return loop(seq(wait_ptr(&weapon.cooldown), run(proc(data: rawptr) -> bool {
-					p := (^Weapon_Payload)(data)
-					if len(p.game.enemies) == 0 do return true
+	return managed(loop(seq(wait_ptr(&weapon.cooldown), run(proc(data: rawptr) -> bool {
+						p := (^Weapon_Payload)(data)
+						if len(p.game.enemies) == 0 do return true
 
-					nearest := 0
-					min_dist := f32(99999.0)
-					for e, i in p.game.enemies {
-						d := linalg.distance(e.pos, p.game.player.pos)
-						if d < min_dist {
-							min_dist = d
-							nearest = i
+						nearest := 0
+						min_dist := f32(99999.0)
+						for e, i in p.game.enemies {
+							d := linalg.distance(e.pos, p.game.player.pos)
+							if d < min_dist {
+								min_dist = d
+								nearest = i
+							}
 						}
-					}
 
-					dir := linalg.normalize(p.game.enemies[nearest].pos - p.game.player.pos)
-					append(&p.game.projectiles, Projectile{pos = p.game.player.pos, dir = dir, speed = 320.0, damage = p.weapon.damage})
-					return true
-				}, payload)))
+						dir := linalg.normalize(p.game.enemies[nearest].pos - p.game.player.pos)
+						append(&p.game.projectiles, Projectile{pos = p.game.player.pos, dir = dir, speed = 320.0, damage = p.weapon.damage})
+						return true
+					}, payload))), payload)
 }
 
 level_up_juice :: proc(game: ^Game_World) -> ^Node {

@@ -559,6 +559,37 @@ not_vtable := Node_VTable {
 	},
 }
 
+Managed_Node :: struct {
+	using node: Node,
+	child:      ^Node,
+	payload:    rawptr,
+	allocator:  mem.Allocator,
+}
+
+managed_vtable := Node_VTable {
+	start = proc(self: ^Node, exec: ^Executor) -> Status {
+		m := (^Managed_Node)(self); enqueue_node(exec, m.child, m); return .Suspended
+	},
+	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Suspended},
+	end = proc(self: ^Node, exec: ^Executor, status: Status) {
+		m := (^Managed_Node)(self)
+		if status == .Aborted && (m.child.status == .Running || m.child.status == .Suspended) {
+			abort_node(exec, m.child)
+		}
+	},
+	on_child_stopped = proc(
+		self: ^Node,
+		exec: ^Executor,
+		status: Status,
+		child: ^Node,
+	) -> Status {return status},
+	destroy = proc(self: ^Node, allocator: mem.Allocator) {
+		m := (^Managed_Node)(self)
+		if m.payload != nil do free(m.payload, m.allocator)
+		destroy_node(m.child, allocator); free(m, allocator)
+	},
+}
+
 Catch_Node :: struct {
 	using node: Node,
 	child:      ^Node,
@@ -872,6 +903,21 @@ not :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 catch :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 	node := new(Catch_Node, allocator); node.base = &catch_vtable; node.child = child
 	node.name = "Catch"; return node
+}
+
+managed :: proc(child: ^Node, payload: rawptr, allocator := context.allocator) -> ^Node {
+	node := new(Managed_Node, allocator); node.base = &managed_vtable
+	node.child = child; node.payload = payload; node.allocator = allocator
+	node.name = "Managed"; return node
+}
+
+managed_run :: proc(
+	callback: Callback_Proc,
+	payload: rawptr,
+	allocator := context.allocator,
+) -> ^Node {
+	child := run(callback, payload, allocator)
+	return managed(child, payload, allocator)
 }
 
 wait_frames :: proc(frames: int, allocator := context.allocator) -> ^Node {
