@@ -1,15 +1,15 @@
 package main
 
 import "base:runtime"
+import "core:log"
 import "core:c"
 import "core:fmt"
-import "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:mem"
 import "core:strings"
-import rl "vendor:raylib"
+import k2 "shared:karl2d"
 
 // --- Windows High Performance GPU Hint ---
 @(export, link_name = "NvOptimusEnablement")
@@ -299,17 +299,17 @@ level_up_sequence :: proc(game: ^Game_World) -> ^Node {
 		named(tween(0.0, 1.0, 0.4, &game.level_up_scale, ease_in_out_cubic), "Show Shop UI"),
 		named(wait_until(proc(d: rawptr) -> bool { // until upgrade is not selected, waits here
 			g := (^Game_World)(d)
-			if rl.IsKeyPressed(.ONE) {
+			if k2.key_went_down(.N1) {
 				for &w in g.player.weapons do w.cooldown *= 0.8
 				return true
 			}
-			if rl.IsKeyPressed(.TWO) {
+			if k2.key_went_down(.N2) {
 				for &w in g.player.weapons do w.damage += 15
 				g.player.max_health += 25
 				g.player.health = g.player.max_health
 				return true
 			}
-			if rl.IsKeyPressed(.THREE) {
+			if k2.key_went_down(.N3) {
 				enqueue_node(&g.exec, shield_behavior(g, 5.0))
 				return true
 			}
@@ -330,7 +330,10 @@ shield_behavior :: proc(game: ^Game_World, duration: f32) -> ^Node {
 			game,
 		), "Activate Shield"),
 		// Race against timer: Stay active until timer wins
-		named(race(named(wait(duration), "Shield Timer"), named(wait_forever(), "Constant Shield")), "Shield Active State"),
+		named(race(
+			named(wait(duration), "Shield Timer"),
+			named(wait_forever(), "Constant Shield")
+		), "Shield Active State"),
 		named(run(
 			proc(d: rawptr) -> bool {(^Game_World)(d).player.shield_active = false; return true},
 			game,
@@ -341,7 +344,10 @@ shield_behavior :: proc(game: ^Game_World, duration: f32) -> ^Node {
 
 super_attack_behavior :: proc(game: ^Game_World) -> ^Node {
 	res := named(seq(
-		named(sync(named(apply_camera_shake(game, 15.0), "Shake Camera"), named(wait(0.5), "Charge Delay")), "Charge Phase"),
+		named(sync(
+			named(apply_camera_shake(game, 15.0), "Shake Camera"),
+			named(wait(0.5), "Charge Delay")
+		), "Charge Phase"),
 		named(run(proc(d: rawptr) -> bool {
 			g := (^Game_World)(d)
 			for i in 0 ..< 12 {
@@ -425,7 +431,6 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 							enqueue_node(&g.sys_exec, boss_ai_timeline(g, boss.boss_state))
 							return true
 						}, game), "Spawn Boss"),
-					//named(wait(20.0), "Boss Cooldown")
 					named(wait_until(proc(d: rawptr) -> bool {
 						g := (^Game_World)(d)
 						return g.boss_fight == false
@@ -563,26 +568,50 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> ^Node {
 			// phase 3 - visually bigger and rapid fire
 			seq(
 				tween(boss.visual_scale, 1.3, 0.6, &boss.visual_scale, ease_in_out_cubic),
-				loop(seq(
-					wait(0.6), // rapid firing rate
-					run(proc(data: rawptr) -> bool {
-						p := (^Boss_AI_Payload)(data)
-						e := find_enemy(p.game, p.boss.self_enemy_id)
-						if e == nil do return true
+				sync(
+					loop(seq( // normal attacks
+						wait(0.6), // rapid firing rate
+						run(proc(data: rawptr) -> bool {
+							p := (^Boss_AI_Payload)(data)
+							e := find_enemy(p.game, p.boss.self_enemy_id)
+							if e == nil do return true
 
-						// spawn faster projectiles
-						dir := linalg.normalize(p.game.player.pos - e.pos)
-						append(&p.game.projectiles, Projectile {
-							pos = e.pos,
-							dir = dir,
-							speed = 350.0,
-							damage = 3,
-							is_enemy_projectile = true,
-						})
+							// spawn faster projectiles
+							dir := linalg.normalize(p.game.player.pos - e.pos)
+							append(&p.game.projectiles, Projectile {
+								pos = e.pos,
+								dir = dir,
+								speed = 350.0,
+								damage = 3,
+								is_enemy_projectile = true,
+							})
 
-						return true
-					}, p),
-				)),
+							return true
+						}, p)),
+					),
+					loop(seq( // sometimes rings
+						wait(4),
+						run(proc(data: rawptr) -> bool {
+							p := (^Boss_AI_Payload)(data)
+							e := find_enemy(p.game, p.boss.self_enemy_id)
+							if e == nil do return true
+
+							// spawn 32 projectiles in a massive ring
+							for i in 0..<16 {
+								angle := f32(i) * math.PI / 8.0
+								append(&p.game.projectiles, Projectile {
+									pos = e.pos,
+									dir = {math.cos(angle), math.sin(angle)},
+									speed = 100.0,
+									damage = 5,
+									is_enemy_projectile = true,
+								})
+							}
+
+							return true
+						}, p)),
+					)
+				)
 			),
 		),
 		// global cleanup scope, reset visual scale, properties for boss state?
@@ -596,22 +625,22 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> ^Node {
 	), p)
 }
 
-get_status_color :: proc(status: Status) -> rl.Color {
+get_status_color :: proc(status: Status) -> k2.Color {
 	switch status {
 	case .Running:
-		return rl.SKYBLUE
+		return k2.RL_SKYBLUE
 	case .Suspended:
-		return rl.YELLOW
+		return k2.RL_YELLOW
 	case .Completed:
-		return rl.GREEN
+		return k2.RL_GREEN
 	case .Failed:
-		return rl.RED
+		return k2.RL_RED
 	case .Aborted:
-		return rl.ORANGE
+		return k2.RL_ORANGE
 	case .None:
-		return rl.LIGHTGRAY
+		return k2.RL_LIGHTGRAY
 	}
-	return rl.WHITE
+	return k2.RL_WHITE
 }
 
 render_coroutine_debugger :: proc(game: ^Game_World) {
@@ -635,16 +664,30 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 	W_W :: 300
 	W_X :: W_WIDTH - W_W
 
-	rl.DrawRectangle(W_X, 0, W_W, W_HEIGHT, rl.Fade(rl.BLACK, 0.85))
-	rl.DrawRectangleLines(W_X, 0, W_W, W_HEIGHT, rl.DARKGRAY)
+	k2.draw_rect(
+		k2.Rect{f32(W_X), 0, f32(W_W), f32(W_HEIGHT)},
+		k2.color_alpha(k2.BLACK, 216),
+	)
+	k2.draw_rect_outline(
+		k2.Rect{f32(W_X), 0, f32(W_W), f32(W_HEIGHT)},
+		1.0,
+		k2.RL_DARKGRAY,
+	)
 
 	y: i32 = 45
-	rl.DrawText("COROUTINE DEBUGGER", W_X + 10, 10, 18, rl.GOLD)
-	rl.DrawText(game.debug_compact ? "MODE: COMPACT (F2)" : "MODE: FULL (F2)", W_X + 10, 26, 12, rl.GRAY)
-	if game.debug_paused do rl.DrawText("PAUSED (F3)", W_X + 120, 26, 12, rl.MAROON)
+	k2.draw_text("COROUTINE DEBUGGER", {f32(W_X + 10), 10}, 18, k2.RL_GOLD)
+	k2.draw_text(
+		game.debug_compact ? "MODE: COMPACT (F2)" : "MODE: FULL (F2)",
+		{f32(W_X + 10), 26},
+		12,
+		k2.RL_GRAY,
+	)
+	if game.debug_paused {
+		k2.draw_text("PAUSED (F3)", {f32(W_X + 120), 26}, 12, k2.RL_MAROON)
+	}
 
 	// Scrolling
-	wheel := rl.GetMouseWheelMove()
+	wheel := k2.get_mouse_wheel_delta()
 	if wheel != 0 {
 		game.debug_scroll -= int(wheel * 2)
 		game.debug_scroll = max(0, game.debug_scroll)
@@ -660,7 +703,12 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 	}
 
 	if len(filter_str) > 0 {
-		rl.DrawText(rl.TextFormat("FILTER: %s", filter_str), W_X + 10, W_HEIGHT - 20, 12, rl.SKYBLUE)
+		k2.draw_text(
+			fmt.tprintf("FILTER: %s", filter_str),
+			{f32(W_X + 10), f32(W_HEIGHT - 20)},
+			12,
+			k2.RL_SKYBLUE,
+		)
 	}
 
 	line_index := 0
@@ -708,17 +756,26 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 
 				display_name := node.name
 				if len(node.dbg.user_name) > 0 {
-					display_name = string(rl.TextFormat("%s (%s)", node.dbg.user_name, node.name))
+					display_name = fmt.tprintf(
+						"%s (%s)",
+						node.dbg.user_name,
+						node.name,
+					)
 				}
 
-				text := rl.TextFormat("%s%s", prefix, display_name)
+				text := fmt.tprintf("%s%s", prefix, display_name)
 				if node.dbg.info_len > 0 {
 					info_str := string(node.dbg.info_buf[:node.dbg.info_len])
-					text = rl.TextFormat("%s : %s", text, info_str)
+					text = fmt.tprintf("%s : %s", text, info_str)
 				}
 
 				if y^ < W_HEIGHT - 30 {
-					rl.DrawText(text, i32(W_WIDTH - 300 + 10 + indent), y^, 12, color)
+					k2.draw_text(
+						text,
+						{f32(W_WIDTH - 300 + 10 + indent), f32(y^)},
+						12,
+						color,
+					)
 					y^ += 12
 				}
 			}
@@ -753,18 +810,18 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 	for f in game.diagnostics.fading_nodes {
 		if line_index >= game.debug_scroll {
 			alpha := 1.0 - f32(game.sys_exec.total_time - f.end_time) / 0.5
-			color := rl.Fade(get_status_color(f.status), alpha)
+			color := k2.color_alpha(get_status_color(f.status), u8(alpha * 255.0))
 			indent := i32(f.depth * 10)
 			display_name := f.name
 			if len(f.user_name) > 0 {
-				display_name = string(rl.TextFormat("%s (%s)", f.user_name, f.name))
+				display_name = fmt.tprintf("%s (%s)", f.user_name, f.name)
 			}
-			text := rl.TextFormat("v %s", display_name)
+			text := fmt.tprintf("v %s", display_name)
 			if len(f.info) > 0 {
-				text = rl.TextFormat("%s : %s", text, f.info)
+				text = fmt.tprintf("%s : %s", text, f.info)
 			}
 			if y < W_HEIGHT - 30 {
-				rl.DrawText(text, i32(W_WIDTH - 300 + 10 + indent), y, 12, color)
+				k2.draw_text(text, {f32(W_WIDTH - 300 + 10 + indent), f32(y)}, 12, color)
 				y += 12
 			}
 		}
@@ -772,25 +829,15 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 	}
 }
 
-main :: proc() {
-	// Tracking memory
-	track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track, context.allocator)
-	context.allocator = mem.tracking_allocator(&track)
-	defer {
-		for _, leak in track.allocation_map {
-			fmt.printf("%v leaked %v bytes\n", leak.location, leak.size)
-		}
-		mem.tracking_allocator_clear(&track)
-	}
 
-	// Init raylib
-	rl.InitWindow(W_WIDTH, W_HEIGHT, "Game")
-	rl.SetTargetFPS(60)
-	defer rl.CloseWindow()
+gw: ^Game_World
+
+init :: proc() {
+	// Init karl2d
+	k2.init(W_WIDTH, W_HEIGHT, "Game", {window_mode = .Windowed})
 
 	// Init game
-	gw: Game_World
+	gw = new(Game_World)
 	gw.player.pos = {f32(W_WIDTH / 2), f32(W_HEIGHT / 2)}
 	gw.player.health = 100
 	gw.player.max_health = 100
@@ -809,26 +856,13 @@ main :: proc() {
 	gw.exec.debugger = &gw.diagnostics
 	gw.sys_exec.debugger = &gw.diagnostics
 
-	defer {
-		for w in gw.player.weapons do free(w)
-		delete(gw.player.weapons)
-		delete(gw.enemies)
-		delete(gw.gems)
-		delete(gw.projectiles)
-		delete(gw.pop_effects)
-		executor_destroy(&gw.exec)
-		executor_destroy(&gw.sys_exec)
-		semaphore_destroy(&gw.charge_semaphore)
-		diagnostics_db_destroy(&gw.diagnostics)
-	}
-
 	// Initial Behaviors
-	enqueue_node(&gw.exec, spawner_behavior(&gw))
+	enqueue_node(&gw.exec, spawner_behavior(gw))
 
 	// Player weapons
 	whip := new(Weapon)
 	whip.name = "Whip"; whip.damage = 15; whip.cooldown = 1.2
-	whip.behavior = whip_behavior(&gw, whip)
+	whip.behavior = whip_behavior(gw, whip)
 	append(&gw.player.weapons, whip)
 	enqueue_node(&gw.exec, whip.behavior)
 
@@ -836,286 +870,347 @@ main :: proc() {
 	fireball.name = "Fireball"
 	fireball.damage = 15
 	fireball.cooldown = 1.8
-	fireball.behavior = fireball_behavior(&gw, fireball)
+	fireball.behavior = fireball_behavior(gw, fireball)
 	append(&gw.player.weapons, fireball)
 	enqueue_node(&gw.exec, fireball.behavior)
+}
 
-	// Game loop
-	for !rl.WindowShouldClose() {
-		dt := rl.GetFrameTime()
+shutdown :: proc() {
+	if gw == nil do return
+	for w in gw.player.weapons do free(w)
+	delete(gw.player.weapons)
+	delete(gw.enemies)
+	delete(gw.gems)
+	delete(gw.projectiles)
+	delete(gw.pop_effects)
+	executor_destroy(&gw.exec)
+	executor_destroy(&gw.sys_exec)
+	semaphore_destroy(&gw.charge_semaphore)
+	diagnostics_db_destroy(&gw.diagnostics)
+	free(gw)
+	k2.shutdown()
+}
 
-		// Debugger Inputs
-		if rl.IsKeyPressed(.F1) {
-			gw.debug_visible = !gw.debug_visible
-			gw.diagnostics.enabled = gw.debug_visible
-			if !gw.diagnostics.enabled {
-				// clean memory
-				for &f in gw.diagnostics.fading_nodes {
-					if len(f.info) > 0 do delete(f.info, gw.diagnostics.allocator)
-				}
-				delete(gw.diagnostics.fading_nodes)
-				gw.diagnostics.fading_nodes = make([dynamic]Fading_Node, 0, 128, gw.diagnostics.allocator)
-				executor_shrink(&gw.exec)
-				executor_shrink(&gw.sys_exec)
+step :: proc() -> bool {
+	if !k2.update() { return false }
+	dt := k2.get_frame_time()
+
+	// Debugger Inputs
+	if k2.key_went_down(.F1) {
+		gw.debug_visible = !gw.debug_visible
+		gw.diagnostics.enabled = gw.debug_visible
+		if !gw.diagnostics.enabled {
+			// clean memory
+			for &f in gw.diagnostics.fading_nodes {
+				if len(f.info) > 0 do delete(f.info, gw.diagnostics.allocator)
 			}
+			delete(gw.diagnostics.fading_nodes)
+			gw.diagnostics.fading_nodes = make([dynamic]Fading_Node, 0, 128, gw.diagnostics.allocator)
+			executor_shrink(&gw.exec)
+			executor_shrink(&gw.sys_exec)
 		}
-		if rl.IsKeyPressed(.F2) do gw.debug_compact = !gw.debug_compact
-		if rl.IsKeyPressed(.F3) {
-			gw.debug_paused = !gw.debug_paused
-			gw.is_paused = gw.debug_paused
+	}
+	if k2.key_went_down(.F2) do gw.debug_compact = !gw.debug_compact
+	if k2.key_went_down(.F3) {
+		gw.debug_paused = !gw.debug_paused
+		gw.is_paused = gw.debug_paused
+	}
+	if k2.key_went_down(.F4) do mem.set(&gw.debug_filter, 0, len(gw.debug_filter))
+
+	if !gw.is_paused {
+		// Player Movement
+		p_dir: [2]f32
+		if k2.key_is_held(.W) || k2.key_is_held(.Up) do p_dir.y -= 1
+		if k2.key_is_held(.S) || k2.key_is_held(.Down) do p_dir.y += 1
+		if k2.key_is_held(.A) || k2.key_is_held(.Left) do p_dir.x -= 1
+		if k2.key_is_held(.D) || k2.key_is_held(.Right) do p_dir.x += 1
+
+		if linalg.length(p_dir) > 0 {
+			gw.player.pos += linalg.normalize(p_dir) * 200.0 * dt
 		}
-		if rl.IsKeyPressed(.F4) do mem.set(&gw.debug_filter, 0, len(gw.debug_filter))
+		gw.player.pos.x = math.clamp(gw.player.pos.x, 10, W_WIDTH - 10)
+		gw.player.pos.y = math.clamp(gw.player.pos.y, 10, W_HEIGHT - 10)
 
-		if !gw.is_paused {
-			// Player Movement
-			p_dir: [2]f32
-			if rl.IsKeyDown(.W) || rl.IsKeyDown(.UP) do p_dir.y -= 1
-			if rl.IsKeyDown(.S) || rl.IsKeyDown(.DOWN) do p_dir.y += 1
-			if rl.IsKeyDown(.A) || rl.IsKeyDown(.LEFT) do p_dir.x -= 1
-			if rl.IsKeyDown(.D) || rl.IsKeyDown(.RIGHT) do p_dir.x += 1
+		if k2.key_went_down(.Space) do enqueue_node(&gw.exec, super_attack_behavior(gw))
 
-			if linalg.length(p_dir) > 0 {
-				gw.player.pos += linalg.normalize(p_dir) * 200.0 * dt
+		// Timers
+		if gw.player.whip_flash_timer > 0.0 do gw.player.whip_flash_timer -= dt
+		if gw.player_damage_timer > 0.0 do gw.player_damage_timer -= dt
+
+		// Update Enemies
+		for i := len(gw.enemies) - 1; i >= 0; i -= 1 {
+			e := &gw.enemies[i]
+			dist_vec := gw.player.pos - e.pos
+			dist := linalg.length(dist_vec)
+
+			// Move
+			if dist > 5.0 {
+				e.pos += linalg.normalize(dist_vec) * e.speed * dt
 			}
-			gw.player.pos.x = math.clamp(gw.player.pos.x, 10, W_WIDTH - 10)
-			gw.player.pos.y = math.clamp(gw.player.pos.y, 10, W_HEIGHT - 10)
 
-			if rl.IsKeyPressed(.SPACE) do enqueue_node(&gw.exec, super_attack_behavior(&gw))
+			// AI Ticks (Coroutines will handle specialized logic)
+			if e.type == .Wizard && rand.float32() < 0.01 {
+				enqueue_node(&gw.exec, wizard_attack_behavior(gw, e.id))
+			}
+			if e.type == .Elite_Skeleton && !e.is_charging && rand.float32() < 0.006 {
+				enqueue_node(&gw.exec, elite_charge_behavior(gw, e.id))
+			}
 
 			// Timers
-			if gw.player.whip_flash_timer > 0.0 do gw.player.whip_flash_timer -= dt
-			if gw.player_damage_timer > 0.0 do gw.player_damage_timer -= dt
+			if e.telegraph_timer > 0.0 do e.telegraph_timer -= dt
 
-			// Update Enemies
-			for i := len(gw.enemies) - 1; i >= 0; i -= 1 {
-				e := &gw.enemies[i]
-				dist_vec := gw.player.pos - e.pos
-				dist := linalg.length(dist_vec)
-
-				// Move
-				if dist > 5.0 {
-					e.pos += linalg.normalize(dist_vec) * e.speed * dt
-				}
-
-				// AI Ticks (Coroutines will handle specialized logic)
-				if e.type == .Wizard && rand.float32() < 0.01 {
-					enqueue_node(&gw.exec, wizard_attack_behavior(&gw, e.id))
-				}
-				if e.type == .Elite_Skeleton && !e.is_charging && rand.float32() < 0.006 {
-					enqueue_node(&gw.exec, elite_charge_behavior(&gw, e.id))
-				}
-
-				// Timers
-				if e.telegraph_timer > 0.0 do e.telegraph_timer -= dt
-
-				// Collision
-				if dist < 15.0 && gw.player_damage_timer <= 0.0 && !gw.player.shield_active {
-					gw.player.health -= 10
-					gw.player_damage_timer = 0.5
-					enqueue_node(&gw.sys_exec, apply_camera_shake(&gw, 6.0))
-				}
-
-				// Death
-				if e.health <= 0 {
-					append(&gw.gems, e.pos)
-					enqueue_node(&gw.sys_exec, death_pop_behavior(&gw, e.pos)) // Visual effect on death
-
-					// handle boss death
-					if e.type == .Boss {
-						if e.boss_state != nil {
-							free(e.boss_state)
-						}
-						gw.boss_fight = false
-						enqueue_node(&gw.sys_exec, apply_camera_shake(&gw, 20.0))
-					}
-
-					unordered_remove(&gw.enemies, i)
-				}
+			// Collision
+			if dist < 15.0 && gw.player_damage_timer <= 0.0 && !gw.player.shield_active {
+				gw.player.health -= 10
+				gw.player_damage_timer = 0.5
+				enqueue_node(&gw.sys_exec, apply_camera_shake(gw, 6.0))
 			}
 
-			// Update Projectiles
-			for i := len(gw.projectiles) - 1; i >= 0; i -= 1 {
-				p := &gw.projectiles[i]
-				p.pos += p.dir * p.speed * dt
+			// Death
+			if e.health <= 0 {
+				append(&gw.gems, e.pos)
+				enqueue_node(&gw.sys_exec, death_pop_behavior(gw, e.pos)) // Visual effect on death
 
-				hit := false
-				if p.is_enemy_projectile {
-					if linalg.distance(p.pos, gw.player.pos) < 18.0 && !gw.player.shield_active {
-						gw.player.health -= p.damage
+				// handle boss death
+				if e.type == .Boss {
+					if e.boss_state != nil {
+						free(e.boss_state)
+					}
+					gw.boss_fight = false
+					enqueue_node(&gw.sys_exec, apply_camera_shake(gw, 20.0))
+				}
+
+				unordered_remove(&gw.enemies, i)
+			}
+		}
+
+		// Update Projectiles
+		for i := len(gw.projectiles) - 1; i >= 0; i -= 1 {
+			p := &gw.projectiles[i]
+			p.pos += p.dir * p.speed * dt
+
+			hit := false
+			if p.is_enemy_projectile {
+				if linalg.distance(p.pos, gw.player.pos) < 18.0 && !gw.player.shield_active {
+					gw.player.health -= p.damage
+					hit = true
+				}
+			} else {
+				for &e in gw.enemies {
+					if linalg.distance(p.pos, e.pos) < 20.0 {
+						e.health -= p.damage
 						hit = true
-					}
-				} else {
-					for &e in gw.enemies {
-						if linalg.distance(p.pos, e.pos) < 20.0 {
-							e.health -= p.damage
-							hit = true
-							break
-						}
-					}
-				}
-
-				if hit ||
-				   p.pos.x < -50 ||
-				   p.pos.x > W_WIDTH + 50 ||
-				   p.pos.y < -50 ||
-				   p.pos.y > W_HEIGHT + 50 {
-					unordered_remove(&gw.projectiles, i)
-				}
-			}
-
-			// Update Gems
-			for i := len(gw.gems) - 1; i >= 0; i -= 1 {
-				gp := gw.gems[i]
-				d := linalg.distance(gw.player.pos, gp)
-				if d < 80.0 {
-					gw.gems[i] += linalg.normalize(gw.player.pos - gp) * 280.0 * dt
-					if d < 12.0 {
-						gw.player.xp += 1
-						unordered_remove(&gw.gems, i)
-						if gw.player.xp >= gw.player.xp_needed {
-							gw.player.xp -= gw.player.xp_needed
-							gw.player.level += 1
-							gw.player.xp_needed = int(f32(gw.player.xp_needed) * 1.5)
-							enqueue_node(&gw.sys_exec, level_up_sequence(&gw))
-						}
+						break
 					}
 				}
 			}
 
-			// Update Pop Effects
-			for i := len(gw.pop_effects) - 1; i >= 0; i -= 1 {
-				eff := gw.pop_effects[i]
-				if eff.ended {
-					// clean pop effect here, instead of coroutine... safely
-					free(eff, gw.sys_exec.allocator)
-					unordered_remove(&gw.pop_effects, i)
+			if hit ||
+			   p.pos.x < -50 ||
+			   p.pos.x > W_WIDTH + 50 ||
+			   p.pos.y < -50 ||
+			   p.pos.y > W_HEIGHT + 50 {
+				unordered_remove(&gw.projectiles, i)
+			}
+		}
+
+		// Update Gems
+		for i := len(gw.gems) - 1; i >= 0; i -= 1 {
+			gp := gw.gems[i]
+			d := linalg.distance(gw.player.pos, gp)
+			if d < 80.0 {
+				gw.gems[i] += linalg.normalize(gw.player.pos - gp) * 280.0 * dt
+				if d < 12.0 {
+					gw.player.xp += 1
+					unordered_remove(&gw.gems, i)
+					if gw.player.xp >= gw.player.xp_needed {
+						gw.player.xp -= gw.player.xp_needed
+						gw.player.level += 1
+						gw.player.xp_needed = int(f32(gw.player.xp_needed) * 1.5)
+						enqueue_node(&gw.sys_exec, level_up_sequence(gw))
+					}
 				}
 			}
 		}
 
-		// Update Executors
-		executor_step(&gw.exec, gw.is_paused ? 0.0 : dt)
-		executor_step(&gw.sys_exec, dt)
-
-		// Rendering
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.Color{24, 28, 36, 255})
-
-		shake := [2]f32 {
-			rand.float32_range(-gw.camera_shake, gw.camera_shake),
-			rand.float32_range(-gw.camera_shake, gw.camera_shake),
-		}
-
-		for g in gw.gems {
-			rl.DrawRectanglePro(
-				rl.Rectangle{g.x + shake.x, g.y + shake.y, 8, 8},
-				{4, 4},
-				45.0,
-				rl.SKYBLUE,
-			)
-		}
-
-		for &e in gw.enemies {
-			col := rl.GRAY
-			sz := f32(10.0)
-			switch e.type {
-			case .Skeleton:
-				col = rl.GRAY; sz = 10
-			case .Elite_Skeleton:
-				col = rl.ORANGE; sz = 16
-			case .Wizard:
-				col = rl.PURPLE; sz = 12
-			case .Boss:
-				col = rl.MAROON; sz = 24
-				if e.boss_state != nil {
-					sz *= e.boss_state.visual_scale
-				}
-			}
-			if e.is_charging do col = rl.YELLOW
-
-			if e.type == .Boss && e.boss_state != nil {
-				// sync boss_state pos
-				e.pos.x = e.boss_state.pos_x
-			}
-
-			if e.type == .Boss && e.boss_state != nil && e.boss_state.shield_active {
-				shield_color := rl.Fade(rl.SKYBLUE, e.boss_state.shield_power * 0.6)
-				rl.DrawCircleLinesV(cast(rl.Vector2)(e.pos + shake), sz + 12.0, shield_color)
-			}
-
-			rl.DrawCircleV(cast(rl.Vector2)(e.pos + shake), sz, col)
-			if e.telegraph_timer > 0.0 {
-				rl.DrawCircleLinesV(
-					cast(rl.Vector2)(e.pos + shake),
-					45.0 * (e.telegraph_timer / 0.8),
-					rl.RED,
-				)
+		// Update Pop Effects
+		for i := len(gw.pop_effects) - 1; i >= 0; i -= 1 {
+			eff := gw.pop_effects[i]
+			if eff.ended {
+				// clean pop effect here, instead of coroutine... safely
+				free(eff, gw.sys_exec.allocator)
+				unordered_remove(&gw.pop_effects, i)
 			}
 		}
-
-		for p in gw.projectiles {
-			rl.DrawCircleV(
-				cast(rl.Vector2)(p.pos + shake),
-				5.0,
-				p.is_enemy_projectile ? rl.VIOLET : rl.GOLD,
-			)
-		}
-
-		for eff in gw.pop_effects {
-			rl.DrawCircleLinesV(cast(rl.Vector2)(eff.pos + shake), eff.radius, rl.WHITE)
-		}
-
-		p_col := gw.player_damage_timer > 0.0 ? rl.ORANGE : rl.GREEN
-		rl.DrawCircleV(cast(rl.Vector2)(gw.player.pos + shake), 13.0, p_col)
-		if gw.player.shield_active do rl.DrawCircleLinesV(cast(rl.Vector2)(gw.player.pos + shake), 24.0, rl.SKYBLUE)
-		if gw.player.whip_flash_timer > 0.0 do rl.DrawCircleLinesV(cast(rl.Vector2)(gw.player.pos + shake), 110.0, rl.Fade(rl.WHITE, 0.5))
-
-		// HUD
-		rl.DrawText(
-			rl.TextFormat(
-				"HP: %d/%d | LVL: %d | XP: %d/%d",
-				gw.player.health,
-				gw.player.max_health,
-				gw.player.level,
-				gw.player.xp,
-				gw.player.xp_needed,
-			),
-			10,
-			10,
-			20,
-			rl.WHITE,
-		)
-
-		rl.DrawText(
-			rl.TextFormat("Active Enemies: %d", len(gw.enemies)),
-			i32(W_WIDTH - 200),
-			10,
-			20,
-			rl.LIGHTGRAY,
-		)
-		rl.DrawText("SPACE: Super Attack", 10, W_HEIGHT - 30, 20, rl.DARKGRAY)
-
-		// Level Up Screen
-		if gw.is_paused {
-			rl.DrawRectangle(0, 0, W_WIDTH, W_HEIGHT, rl.Fade(rl.BLACK, 0.8 * gw.level_up_scale))
-			y := f32(W_HEIGHT / 2 - 40) * gw.level_up_scale
-			rl.DrawText("LEVEL UP!", W_WIDTH / 2 - 80, i32(y - 100), 32, rl.GOLD)
-
-			opts := [3]string{"[1] SPEED", "[2] POWER", "[3] SHIELD"}
-			for s, i in opts {
-				rl.DrawRectangle(i32(W_WIDTH / 2 - 300 + i * 210), i32(y), 180, 80, rl.DARKGRAY)
-				rl.DrawRectangleLines(i32(W_WIDTH / 2 - 300 + i * 210), i32(y), 180, 80, rl.GOLD)
-				rl.DrawText(rl.TextFormat("%s", s), i32(W_WIDTH / 2 - 270 + i * 210), i32(y + 32), 16, rl.WHITE)
-			}
-		}
-
-		if gw.player.health <= 0 {
-			rl.DrawRectangle(0, 0, W_WIDTH, W_HEIGHT, rl.Fade(rl.MAROON, 0.7))
-			rl.DrawText("GAME OVER", W_WIDTH / 2 - 100, W_HEIGHT / 2 - 20, 40, rl.WHITE)
-		}
-
-		render_coroutine_debugger(&gw)
-
-		rl.EndDrawing()
 	}
+
+	// Update Executors
+	executor_step(&gw.exec, gw.is_paused ? 0.0 : dt)
+	executor_step(&gw.sys_exec, dt)
+
+	// Rendering
+	k2.clear(k2.Color{24, 28, 36, 255})
+
+	shake := [2]f32 {
+		rand.float32_range(-gw.camera_shake, gw.camera_shake),
+		rand.float32_range(-gw.camera_shake, gw.camera_shake),
+	}
+
+	for g in gw.gems {
+		k2.draw_rect_vec(
+			g + shake,
+			{8, 8},
+			k2.RL_SKYBLUE,
+			{4, 4},
+			45.0 * (math.PI / 180.0),
+		)
+	}
+
+	for &e in gw.enemies {
+		col := k2.RL_GRAY
+		sz := f32(10.0)
+		switch e.type {
+		case .Skeleton:
+			col = k2.RL_GRAY; sz = 10
+		case .Elite_Skeleton:
+			col = k2.RL_ORANGE; sz = 16
+		case .Wizard:
+			col = k2.RL_PURPLE; sz = 12
+		case .Boss:
+			col = k2.RL_MAROON; sz = 24
+			if e.boss_state != nil {
+				sz *= e.boss_state.visual_scale
+			}
+		}
+		if e.is_charging do col = k2.RL_YELLOW
+
+		if e.type == .Boss && e.boss_state != nil {
+			// sync boss_state pos
+			e.pos.x = e.boss_state.pos_x
+		}
+
+		if e.type == .Boss && e.boss_state != nil && e.boss_state.shield_active {
+			clamped_alpha := math.clamp(e.boss_state.shield_power * 0.6 * 255.0, 0, 255)
+			shield_color := k2.color_alpha(k2.RL_SKYBLUE, u8(clamped_alpha))
+			k2.draw_circle_outline(e.pos + shake, sz + 12.0, 1.0, shield_color)
+		}
+
+		k2.draw_circle(e.pos + shake, sz, col)
+		if e.telegraph_timer > 0.0 {
+			k2.draw_circle_outline(
+				e.pos + shake,
+				45.0 * (e.telegraph_timer / 0.8),
+				1.0,
+				k2.RL_RED,
+			)
+		}
+	}
+
+	for p in gw.projectiles {
+		k2.draw_circle(
+			p.pos + shake,
+			5.0,
+			p.is_enemy_projectile ? k2.RL_VIOLET : k2.RL_GOLD,
+		)
+	}
+
+	for eff in gw.pop_effects {
+		k2.draw_circle_outline(eff.pos + shake, eff.radius, 1.0, k2.RL_WHITE)
+	}
+
+	p_col := gw.player_damage_timer > 0.0 ? k2.RL_ORANGE : k2.RL_GREEN
+	k2.draw_circle(gw.player.pos + shake, 13.0, p_col)
+	if gw.player.shield_active {
+		k2.draw_circle_outline(gw.player.pos + shake, 24.0, 1.0, k2.RL_SKYBLUE)
+	}
+	if gw.player.whip_flash_timer > 0.0 {
+		k2.draw_circle_outline(
+			gw.player.pos + shake,
+			110.0,
+			1.0,
+			k2.color_alpha(k2.RL_WHITE, 128),
+		)
+	}
+
+	// HUD
+	hud_str := fmt.tprintf(
+		"HP: %d/%d | LVL: %d | XP: %d/%d",
+		gw.player.health,
+		gw.player.max_health,
+		gw.player.level,
+		gw.player.xp,
+		gw.player.xp_needed,
+	)
+	k2.draw_text(hud_str, {10, 10}, 20, k2.RL_WHITE)
+
+	enemies_str := fmt.tprintf("Active Enemies: %d", len(gw.enemies))
+	k2.draw_text(enemies_str, {f32(W_WIDTH - 200), 10}, 20, k2.RL_LIGHTGRAY)
+	k2.draw_text("SPACE: Super Attack", {10, f32(W_HEIGHT - 30)}, 20, k2.RL_DARKGRAY)
+
+	// Level Up Screen
+	if gw.is_paused {
+		k2.draw_rect(
+			k2.Rect{0, 0, f32(W_WIDTH), f32(W_HEIGHT)},
+			k2.color_alpha(k2.BLACK, u8(0.8 * gw.level_up_scale * 255.0)),
+		)
+		y := f32(W_HEIGHT / 2 - 40) * gw.level_up_scale
+		k2.draw_text("LEVEL UP!", {f32(W_WIDTH / 2 - 80), y - 100}, 32, k2.RL_GOLD)
+
+		opts := [3]string{"[1] SPEED", "[2] POWER", "[3] SHIELD"}
+		for s, i in opts {
+			rx := f32(W_WIDTH / 2 - 300 + i * 210)
+			k2.draw_rect(k2.Rect{rx, y, 180, 80}, k2.RL_DARKGRAY)
+			k2.draw_rect_outline(k2.Rect{rx, y, 180, 80}, 1.0, k2.RL_GOLD)
+			k2.draw_text(s, {rx + 30, y + 32}, 16, k2.RL_WHITE)
+		}
+	}
+
+	if gw.player.health <= 0 {
+		k2.draw_rect(
+			k2.Rect{0, 0, f32(W_WIDTH), f32(W_HEIGHT)},
+			k2.color_alpha(k2.RL_MAROON, 178),
+		)
+		k2.draw_text(
+			"GAME OVER",
+			{f32(W_WIDTH / 2 - 100), f32(W_HEIGHT / 2 - 20)},
+			40,
+			k2.RL_WHITE,
+		)
+	}
+
+	render_coroutine_debugger(gw)
+
+	k2.present()
+
+	free_all(context.temp_allocator)
+
+	return true
+}
+
+main :: proc() {
+	context.logger = log.create_console_logger()
+
+	// Tracking memory
+	track: mem.Tracking_Allocator
+	when ODIN_DEBUG {
+	mem.tracking_allocator_init(&track, context.allocator)
+	context.allocator = mem.tracking_allocator(&track)
+	}
+
+	reset_tracking_allocator :: proc(track: ^mem.Tracking_Allocator) -> (leaks: bool) {
+		for _, leak in track.allocation_map {
+			fmt.printf("%v leaked %v bytes\n", leak.location, leak.size)
+			leaks = true
+		}
+		for bad_free in track.bad_free_array {
+			fmt.printf("%v allocation %p was freed badly\n", bad_free.location, bad_free.memory)
+		}
+		mem.tracking_allocator_clear(track)
+		return
+	}
+	defer reset_tracking_allocator(&track)
+
+	init()
+	defer shutdown()
+	for step() {}
 }
