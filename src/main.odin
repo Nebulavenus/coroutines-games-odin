@@ -36,7 +36,6 @@ Player :: struct {
 	weapons:          [dynamic]^Weapon,
 	whip_flash_timer: f32,
 	shield_active:    bool,
-	pending_level_ups: int,
 }
 
 Enemy :: struct {
@@ -47,6 +46,15 @@ Enemy :: struct {
 	is_charging:     bool,
 	telegraph_timer: f32,
 	id:              int, // Unique ID to track across frames safely
+	boss_state:      ^Boss_State,
+}
+
+Boss_State :: struct {
+	self_enemy_id: int,
+	pos_x: f32,
+	shield_active: bool,
+	shield_power: f32,
+	visual_scale: f32,
 }
 
 Weapon :: struct {
@@ -89,6 +97,7 @@ Game_World :: struct {
 	player_damage_timer: f32,
 	camera_shake:        f32,
 	level_up_scale:      f32,
+	boss_fight: 		 bool,
 	boss_spawned_at:     int,
 	enemy_id_counter:    int,
 }
@@ -357,7 +366,7 @@ apply_camera_shake :: proc(game: ^Game_World, amount: f32) -> ^Node {
 }
 
 spawner_behavior :: proc(game: ^Game_World) -> ^Node {
-	spawn :: proc(game: ^Game_World, type: Enemy_Type) {
+	spawn :: proc(game: ^Game_World, type: Enemy_Type) -> ^Enemy {
 		game.enemy_id_counter += 1
 		angle := rand.float32_range(0, 2 * math.PI)
 		dist := f32(450.0)
@@ -383,27 +392,52 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 				speed = spd,
 				type = type,
 				id = game.enemy_id_counter,
+				boss_state = nil,
 			},
 		)
+
+		boss_idx := len(game.enemies) - 1
+		boss := &game.enemies[boss_idx]
+		if type == .Boss {
+			bs := new(Boss_State)
+			bs.self_enemy_id = boss.id
+			bs.pos_x = boss.pos.x
+			bs.visual_scale = 1.0
+			boss.boss_state = bs
+		}
+
+		return &game.enemies[boss_idx]
 	}
-	res := named(loop(named(seq(
+	res := named(loop(
+		named(seq(
 			named(select(
-				named(seq(named(check(proc(d: rawptr) -> bool {
+				named(seq(
+					named(check(proc(d: rawptr) -> bool {
 							g := (^Game_World)(d)
-							return g.player.level > 0 && g.player.level % 5 == 0 && g.boss_spawned_at != g.player.level
+							return g.player.level > 0 && g.player.level % 2 == 0 && g.boss_spawned_at != g.player.level
 						}, game), "Check Boss Conditions"),
 					named(run(proc(d: rawptr) -> bool {
 							g := (^Game_World)(d)
 							g.boss_spawned_at = g.player.level
-							spawn(g, .Boss)
+							g.boss_fight = true // lock spawning of mobs until boss is defeated
+							boss := spawn(g, .Boss)
 							enqueue_node(&g.sys_exec, apply_camera_shake(g, 10.0))
+							enqueue_node(&g.sys_exec, boss_ai_timeline(g, boss.boss_state))
 							return true
 						}, game), "Spawn Boss"),
-					named(wait(20.0), "Boss Cooldown")
+					//named(wait(20.0), "Boss Cooldown")
+					named(wait_until(proc(d: rawptr) -> bool {
+						g := (^Game_World)(d)
+						return g.boss_fight == false
+					}, game), "Boss Fight Defeated?")
 				), "Boss Spawn Branch"),
-				named(seq(named(race(named(wait(3.0), "Spawn Interval"), named(wait_until(proc(d: rawptr) -> bool {
+				named(seq(
+					named(race(
+						named(wait(3.0), "Spawn Interval"),
+						named(wait_until(proc(d: rawptr) -> bool {
 							return (^Game_World)(d).player.health < 30
-						}, game), "Urgent Spawn Trigger")), "Normal Wait"),
+						}, game), "Urgent Spawn Trigger")
+					), "Normal Wait"),
 					named(run(proc(d: rawptr) -> bool {
 						g := (^Game_World)(d)
 						spawn(g, .Skeleton)
@@ -415,6 +449,151 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 			), "Spawn Logic")
 		), "Spawner Main Loop")), "Enemy Spawner Behavior")
 	return res
+}
+
+boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> ^Node {
+	Boss_AI_Payload :: struct {
+		game: ^Game_World,
+		boss: ^Boss_State,
+	}
+
+	p := new(Boss_AI_Payload, game.sys_exec.allocator)
+	p.game = game
+	p.boss = boss
+
+	center_x := f32(W_WIDTH / 2)
+
+	return managed(scope(
+		seq(
+			// phase 1 - attack loop,
+			race(
+				// trigger for phase 2, if boss hp is below 400
+				wait_until(proc(data: rawptr) -> bool {
+					p := (^Boss_AI_Payload)(data)
+					e := find_enemy(p.game, p.boss.self_enemy_id)
+					return e != nil && e.health < 400
+				}, p),
+
+				// if hp is still above 400 hp, standard movement, and attack loops
+				sync(
+					// horizontal slide loop
+					loop(seq(
+						tween(center_x, center_x + 200.0, 3.0, &boss.pos_x, ease_in_out_cubic),
+						wait(0.5),
+						tween(center_x + 200.0, center_x - 200.0, 6.0, &boss.pos_x, ease_in_out_cubic),
+						wait(0.5),
+						tween(center_x - 200.0, center_x, 3.0, &boss.pos_x, ease_in_out_cubic),
+					)),
+					// firing lop
+					loop(seq(
+						wait(1.5),
+						run(proc(data: rawptr) -> bool {
+							p := (^Boss_AI_Payload)(data)
+							e := find_enemy(p.game, p.boss.self_enemy_id)
+							if e == nil do return true
+
+							// spawn spiral pattern bullets
+							for i in 0..<8 {
+								angle := f32(i) * math.PI / 4.0
+								append(&p.game.projectiles, Projectile {
+									pos = e.pos,
+									dir = {math.cos(angle), math.sin(angle)},
+									speed = 200.0,
+									damage = 10,
+									is_enemy_projectile = true,
+								})
+							}
+
+							return true
+						}, p),
+					))
+				)
+			),
+			// phase 2 - transition shield charging in center
+			seq(
+				// move boss to center
+				tween(boss.pos_x, center_x, 1.0, &boss.pos_x, ease_in_out_cubic),
+
+				scope(seq(
+					// activate shield
+					run(proc(data: rawptr) -> bool {
+						p := (^Boss_AI_Payload)(data)
+						p.boss.shield_active = true
+						return true
+					}, p),
+					tween(0.0, 1.0, 0.5, &boss.shield_power),
+					// shake screen, charge shield
+					sync(
+						apply_camera_shake(game, 15.0),
+						seq(
+							tween(1.0, 1.6, 1.5, &boss.visual_scale, ease_in_out_elastic),
+							wait(0.5),
+						),
+					),
+					// trigger super explosion
+					run(proc(data: rawptr) -> bool {
+						p := (^Boss_AI_Payload)(data)
+						e := find_enemy(p.game, p.boss.self_enemy_id)
+						if e == nil do return true
+
+						// spawn 32 projectiles in a massive ring
+						for i in 0..<24 {
+							angle := f32(i) * math.PI / 12.0
+							append(&p.game.projectiles, Projectile {
+								pos = e.pos,
+								dir = {math.cos(angle), math.sin(angle)},
+								speed = 250.0,
+								damage = 5,
+								is_enemy_projectile = true,
+							})
+						}
+
+						return true
+					}, p)),
+					// cleanup scope, deactivate shield
+					on_exit = proc(data: rawptr, status: Status) {
+						b := (^Boss_AI_Payload)(data)
+						b.boss.shield_active = false
+						b.boss.shield_power = 0.0
+					},
+					payload = p
+				),
+			),
+
+			// phase 3 - visually bigger and rapid fire
+			seq(
+				tween(boss.visual_scale, 1.3, 0.6, &boss.visual_scale, ease_in_out_cubic),
+				loop(seq(
+					wait(0.6), // rapid firing rate
+					run(proc(data: rawptr) -> bool {
+						p := (^Boss_AI_Payload)(data)
+						e := find_enemy(p.game, p.boss.self_enemy_id)
+						if e == nil do return true
+
+						// spawn faster projectiles
+						dir := linalg.normalize(p.game.player.pos - e.pos)
+						append(&p.game.projectiles, Projectile {
+							pos = e.pos,
+							dir = dir,
+							speed = 350.0,
+							damage = 3,
+							is_enemy_projectile = true,
+						})
+
+						return true
+					}, p),
+				)),
+			),
+		),
+		// global cleanup scope, reset visual scale, properties for boss state?
+		on_exit = proc(data: rawptr, status: Status) {
+			b := (^Boss_AI_Payload)(data)
+			b.boss.visual_scale = 1.0
+			b.boss.shield_active = false
+			b.boss.shield_power = 0.0
+		},
+		payload = p,
+	), p)
 }
 
 get_status_color :: proc(status: Status) -> rl.Color {
@@ -740,6 +919,16 @@ main :: proc() {
 				if e.health <= 0 {
 					append(&gw.gems, e.pos)
 					enqueue_node(&gw.sys_exec, death_pop_behavior(&gw, e.pos)) // Visual effect on death
+
+					// handle boss death
+					if e.type == .Boss {
+						if e.boss_state != nil {
+							free(e.boss_state)
+						}
+						gw.boss_fight = false
+						enqueue_node(&gw.sys_exec, apply_camera_shake(&gw, 20.0))
+					}
+
 					unordered_remove(&gw.enemies, i)
 				}
 			}
@@ -826,7 +1015,7 @@ main :: proc() {
 			)
 		}
 
-		for e in gw.enemies {
+		for &e in gw.enemies {
 			col := rl.GRAY
 			sz := f32(10.0)
 			switch e.type {
@@ -838,8 +1027,21 @@ main :: proc() {
 				col = rl.PURPLE; sz = 12
 			case .Boss:
 				col = rl.MAROON; sz = 24
+				if e.boss_state != nil {
+					sz *= e.boss_state.visual_scale
+				}
 			}
 			if e.is_charging do col = rl.YELLOW
+
+			if e.type == .Boss && e.boss_state != nil {
+				// sync boss_state pos
+				e.pos.x = e.boss_state.pos_x
+			}
+
+			if e.type == .Boss && e.boss_state != nil && e.boss_state.shield_active {
+				shield_color := rl.Fade(rl.SKYBLUE, e.boss_state.shield_power * 0.6)
+				rl.DrawCircleLinesV(cast(rl.Vector2)(e.pos + shake), sz + 12.0, shield_color)
+			}
 
 			rl.DrawCircleV(cast(rl.Vector2)(e.pos + shake), sz, col)
 			if e.telegraph_timer > 0.0 {

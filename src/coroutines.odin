@@ -767,29 +767,34 @@ managed_vtable := Node_VTable {
 Catch_Node :: struct {
 	using node: Node,
 	child:      ^Node,
+	output:  	^bool, // nil to ignore result
 }
 
 catch_vtable := Node_VTable {
 	start = proc(self: ^Node, exec: ^Executor) -> Status {
-		c := (^Catch_Node)(self); enqueue_node(exec, c.child, c); return .Suspended
+		c := (^Catch_Node)(self)
+		enqueue_node(exec, c.child, c)
+		return .Suspended
 	},
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Suspended},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {
-		c := (^Catch_Node)(
-			self,
-		); if status == .Aborted && (c.child.status == .Running || c.child.status == .Suspended) {
+		c := (^Catch_Node)(self)
+		if status == .Aborted && (c.child.status == .Running || c.child.status == .Suspended) {
 			abort_node(exec, c.child)
 		}
 	},
-	on_child_stopped = proc(
-		self: ^Node,
-		exec: ^Executor,
-		status: Status,
-		child: ^Node,
-	) -> Status {return .Completed},
+	on_child_stopped = proc(self: ^Node, exec: ^Executor, status: Status, child: ^Node) -> Status {
+		c := (^Catch_Node)(self)
+		if c.output != nil {
+			c.output^ = (status == .Completed)
+		}
+		return .Completed
+	},
 	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {
-		c := (^Catch_Node)(self); destroy_node(c.child, exec); free(c, exec.allocator)
+		c := (^Catch_Node)(self)
+		destroy_node(c.child, exec)
+		free(c, exec.allocator)
 	},
 }
 
@@ -1260,7 +1265,7 @@ nop :: proc(allocator := context.allocator) -> ^Node {
 	return run(proc(_: rawptr) -> bool {return true}, nil, allocator)
 }
 
-error_node :: proc(allocator := context.allocator) -> ^Node {
+fail :: proc(allocator := context.allocator) -> ^Node {
 	return run(proc(_: rawptr) -> bool {return false}, nil, allocator)
 }
 
