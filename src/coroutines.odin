@@ -19,9 +19,7 @@ Node :: struct {
 	parent:     ^Node,
 	status:     Status,
 	name:       string,
-	user_name:  string,
-	is_leaf:    bool,
-	is_scope:   bool,
+	dbg:        ^Node_Debug_Info,
 }
 
 Node_VTable :: struct {
@@ -39,100 +37,91 @@ Node_Exec_Info :: struct {
 	status: Status,
 }
 
-Debug_Node :: struct {
-	id:         rawptr,
-	parent_id:  rawptr,
-	name:       string,
+Node_Debug_Info :: struct {
 	user_name:  string,
-	status:     Status,
-	info:       string,
+	info_buf:   [64]byte,
+	info_len:   int,
 	start_time: f64,
-	end_time:   f64,
 	is_leaf:    bool,
 	is_scope:   bool,
+}
+
+Fading_Node :: struct {
+	name:       string,
+	user_name:  string,
+	info:       string, // cloned only for fading
+	status:     Status,
+	end_time:   f64,
 	depth:      int,
 }
 
 Diagnostics_DB :: struct {
-	enabled:   bool,
-	entries:   map[rawptr]Debug_Node,
-	allocator: mem.Allocator,
+	enabled:      bool,
+	fading_nodes: [dynamic]Fading_Node,
+	allocator:    mem.Allocator,
 }
 
 diagnostics_db_init :: proc(db: ^Diagnostics_DB, allocator := context.allocator) {
 	db.allocator = allocator
 	db.enabled = true
-	db.entries = make(map[rawptr]Debug_Node, 128, allocator)
+	db.fading_nodes = make([dynamic]Fading_Node, 0, 128, allocator)
 }
 
 diagnostics_db_destroy :: proc(db: ^Diagnostics_DB) {
-	for id, &entry in db.entries {
-		if len(entry.info) > 0 do delete(entry.info, db.allocator)
+	for &f in db.fading_nodes {
+		if len(f.info) > 0 do delete(f.info, db.allocator)
 	}
-	delete(db.entries)
+	delete(db.fading_nodes)
 }
 
-diagnostics_cleanup_node :: proc(db: ^Diagnostics_DB, node: ^Node) {
-	if db == nil || node == nil do return
-	if entry, found := db.entries[node]; found {
-		if len(entry.info) > 0 {
-			delete(entry.info, db.allocator)
-		}
-		delete_key(&db.entries, node)
+diagnostics_init_node :: proc(exec: ^Executor, node: ^Node, user_name: string = "", is_leaf := false, is_scope := false) {
+	if exec.debugger == nil || !exec.debugger.enabled || node == nil do return
+
+	if node.dbg == nil {
+		node.dbg = new(Node_Debug_Info, exec.allocator)
 	}
+
+	node.dbg.user_name = user_name
+	node.dbg.is_leaf = is_leaf
+	node.dbg.is_scope = is_scope
+	node.dbg.start_time = exec.total_time
+	node.dbg.info_len = 0
 }
 
-diagnostics_notify_destroyed :: proc(db: ^Diagnostics_DB, node: ^Node, time: f64) {
-	if db == nil || !db.enabled || node == nil do return
-	if node in db.entries {
-		entry := db.entries[node]
-		if entry.end_time == 0 {
-			entry.end_time = time
-			db.entries[node] = entry
-		}
-	}
-}
-
-diagnostics_update_node :: proc(db: ^Diagnostics_DB, node: ^Node, time: f64) {
-	if db == nil || !db.enabled || node == nil do return
-
-	entry, found := db.entries[node]
-	if !found {
-		entry = Debug_Node {
-			id         = node,
-			parent_id  = node.parent,
-			name       = node.name,
-			user_name  = node.user_name,
-			status     = node.status,
-			start_time = time,
-			is_leaf    = node.is_leaf,
-			is_scope   = node.is_scope,
-		}
-	}
-
-	entry.status = node.status
-	entry.parent_id = node.parent
-	entry.user_name = node.user_name
+diagnostics_update_node :: proc(exec: ^Executor, node: ^Node) {
+	if exec.debugger == nil || !exec.debugger.enabled || node == nil || node.dbg == nil do return
 
 	if node.get_debug_info != nil {
-		buf: [128]byte
-		info := node.get_debug_info(node, buf[:])
-		if len(info) > 0 {
-			// Avoid leak: free old string before cloning new one
-			if len(entry.info) > 0 do delete(entry.info, db.allocator)
-			entry.info = strings.clone(info, db.allocator)
-		} else {
-			if len(entry.info) > 0 do delete(entry.info, db.allocator)
-			entry.info = ""
-		}
+		info := node.get_debug_info(node, node.dbg.info_buf[:])
+		node.dbg.info_len = len(info)
 	}
-	if node.status == .Completed || node.status == .Failed || node.status == .Aborted {
-		if entry.end_time == 0 do entry.end_time = time
-	} else {
-		entry.end_time = 0
+}
+
+diagnostics_notify_destroyed :: proc(exec: ^Executor, node: ^Node, depth: int) {
+	if exec.debugger == nil || !exec.debugger.enabled || node == nil || node.dbg == nil {
+		if node != nil && node.dbg != nil {
+			free(node.dbg, exec.allocator)
+			node.dbg = nil
+		}
+		return
 	}
 
-	db.entries[node] = entry
+	db := exec.debugger
+	f := Fading_Node {
+		name      = node.name,
+		user_name = node.dbg.user_name,
+		status    = node.status,
+		end_time  = exec.total_time,
+		depth     = depth,
+	}
+
+	if node.dbg.info_len > 0 {
+		f.info = strings.clone(string(node.dbg.info_buf[:node.dbg.info_len]), db.allocator)
+	}
+
+	append(&db.fading_nodes, f)
+	free(node.dbg, exec.allocator)
+	node.dbg = nil
 }
 
 Executor :: struct {
@@ -182,10 +171,9 @@ executor_shrink :: proc(exec: ^Executor) {
 	shrink(&exec.suspended_nodes)
 }
 
-destroy_node :: proc(node: ^Node, exec: ^Executor) {
+destroy_node :: proc(node: ^Node, exec: ^Executor, depth: int = 0) {
 	if node != nil {
-		// Mark node as dead for fade-out, but don't delete entry yet
-		diagnostics_notify_destroyed(exec.debugger, node, exec.total_time)
+		diagnostics_notify_destroyed(exec, node, depth)
 
 		for &info in exec.active_nodes {
 			if info.node == node do info.node = nil
@@ -205,7 +193,10 @@ destroy_node :: proc(node: ^Node, exec: ^Executor) {
 
 enqueue_node :: proc(exec: ^Executor, node: ^Node, parent: ^Node = nil) {
 	node.parent = parent
-	diagnostics_update_node(exec.debugger, node, exec.total_time)
+	if exec.debugger != nil && exec.debugger.enabled && node.dbg == nil {
+		node.dbg = new(Node_Debug_Info, exec.allocator)
+		node.dbg.start_time = exec.total_time
+	}
 	append(&exec.active_nodes, Node_Exec_Info{node = node, parent = parent, status = .None})
 }
 
@@ -236,7 +227,7 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 		if info.status == .None {
 			info.status = info.node.start(info.node, exec)
 			info.node.status = info.status
-			diagnostics_update_node(exec.debugger, info.node, exec.total_time)
+			diagnostics_update_node(exec, info.node)
 
 			if info.status == .Suspended {
 				append(&exec.suspended_nodes, info)
@@ -251,7 +242,7 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 		if info.status == .Running {
 			info.status = info.node.update(info.node, exec, dt)
 			info.node.status = info.status
-			diagnostics_update_node(exec.debugger, info.node, exec.total_time)
+			diagnostics_update_node(exec, info.node)
 
 			if info.status == .Suspended {
 				append(&exec.suspended_nodes, info)
@@ -282,7 +273,7 @@ executor_step :: proc(exec: ^Executor, dt: f32) {
 process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status) {
 	info.node.end(info.node, exec, status)
 	info.node.status = status
-	diagnostics_update_node(exec.debugger, info.node, exec.total_time)
+	diagnostics_update_node(exec, info.node)
 
 	if info.parent != nil {
 		parent_status := info.parent.on_child_stopped(info.parent, exec, status, info.node)
@@ -290,7 +281,7 @@ process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status)
 		for j := 0; j < len(exec.active_nodes); j += 1 {
 			if exec.active_nodes[j].node == info.parent {
 				exec.active_nodes[j].status = parent_status
-				diagnostics_update_node(exec.debugger, exec.active_nodes[j].node, exec.total_time)
+				diagnostics_update_node(exec, info.parent)
 			}
 		}
 
@@ -304,7 +295,7 @@ process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status)
 				} else {
 					exec.next_active_nodes[j].status = parent_status
 				}
-				diagnostics_update_node(exec.debugger, info.parent, exec.total_time)
+				diagnostics_update_node(exec, info.parent)
 			}
 		}
 
@@ -318,7 +309,7 @@ process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status)
 				} else {
 					exec.suspended_nodes[j].status = parent_status
 				}
-				diagnostics_update_node(exec.debugger, info.parent, exec.total_time)
+				diagnostics_update_node(exec, info.parent)
 			}
 		}
 	} else {
@@ -330,7 +321,7 @@ abort_node :: proc(exec: ^Executor, node: ^Node) {
 	if node == nil do return
 	node.end(node, exec, .Aborted)
 	node.status = .Aborted
-	diagnostics_update_node(exec.debugger, node, exec.total_time)
+	diagnostics_update_node(exec, node)
 
 	for &info in exec.active_nodes {
 		if info.node == node {
@@ -1126,12 +1117,14 @@ race :: proc(nodes: ..^Node, allocator := context.allocator) -> ^Node {
 
 wait :: proc(duration: f32, allocator := context.allocator) -> ^Node {
 	node := new(Wait_Node, allocator); node.base = &wait_vtable; node.duration = duration
-	node.name = "Wait"; node.is_leaf = true; return node
+	node.name = "Wait"
+	return node
 }
 
 wait_ptr :: proc(duration: ^f32, allocator := context.allocator) -> ^Node {
 	node := new(Wait_Node, allocator); node.base = &wait_vtable; node.duration_ptr = duration
-	node.name = "WaitPtr"; node.is_leaf = true; return node
+	node.name = "WaitPtr"
+	return node
 }
 
 run :: proc(
@@ -1140,7 +1133,7 @@ run :: proc(
 	allocator := context.allocator,
 ) -> ^Node {
 	node := new(Callback_Node, allocator); node.base = &callback_vtable
-	node.callback = callback; node.payload = payload; node.name = "Callback"; node.is_leaf = true
+	node.callback = callback; node.payload = payload; node.name = "Callback"
 	return node
 }
 
@@ -1158,7 +1151,8 @@ tween :: proc(
 	node := new(Tween_Node, allocator); node.base = &tween_vtable
 	node.start_val =
 		start; node.target_val = target; node.duration = duration; node.output = output; node.ease = ease
-	node.name = "Tween"; node.is_leaf = true; return node
+	node.name = "Tween"
+	return node
 }
 
 wait_until :: proc(
@@ -1167,7 +1161,7 @@ wait_until :: proc(
 	allocator := context.allocator,
 ) -> ^Node {
 	node := new(Condition_Node, allocator); node.base = &condition_vtable
-	node.condition = condition; node.payload = payload; node.name = "WaitUntil"; node.is_leaf = true
+	node.condition = condition; node.payload = payload; node.name = "WaitUntil"
 	return node
 }
 
@@ -1177,7 +1171,7 @@ check :: proc(
 	allocator := context.allocator,
 ) -> ^Node {
 	node := new(Callback_Node, allocator); node.base = &callback_vtable
-	node.callback = condition; node.payload = payload; node.name = "Check"; node.is_leaf = true
+	node.callback = condition; node.payload = payload; node.name = "Check"
 	return node
 }
 
@@ -1189,7 +1183,9 @@ scope :: proc(
 ) -> ^Node {
 	node := new(Scope_Node, allocator); node.base = &scope_vtable
 	node.child = child; node.on_exit = on_exit; node.payload = payload
-	node.name = "Scope"; node.is_scope = true; return node
+	node.name = "Scope"
+	diagnostics_init_node_auto(node, is_scope = true)
+	return node
 }
 
 not :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
@@ -1205,7 +1201,9 @@ catch :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 managed :: proc(child: ^Node, payload: rawptr, allocator := context.allocator) -> ^Node {
 	node := new(Managed_Node, allocator); node.base = &managed_vtable
 	node.child = child; node.payload = payload; node.allocator = allocator
-	node.name = "Managed"; node.is_scope = true; return node
+	node.name = "Managed"
+	diagnostics_init_node_auto(node, is_scope = true)
+	return node
 }
 
 managed_run :: proc(
@@ -1221,7 +1219,7 @@ wait_frames :: proc(frames: int, allocator := context.allocator) -> ^Node {
 	node := new(Wait_Frames_Node, allocator)
 	node.base = &wait_frames_vtable
 	node.target_frames = frames
-	node.name = "WaitFrames"; node.is_leaf = true
+	node.name = "WaitFrames"
 	return node
 }
 
@@ -1253,7 +1251,8 @@ semaphore_scope :: proc(sem: ^Semaphore, child: ^Node, allocator := context.allo
 	node.child = child
 	node.sem = sem
 	node.acquired = false
-	node.name = "Semaphore"; node.is_scope = true
+	node.name = "Semaphore"
+	diagnostics_init_node_auto(node, is_scope = true)
 	return node
 }
 
@@ -1272,7 +1271,8 @@ fork :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 
 wait_forever :: proc(allocator := context.allocator) -> ^Node {
 	node := new(Wait_Forever_Node, allocator); node.base = &wait_forever_vtable
-	node.name = "WaitForever"; node.is_leaf = true; return node
+	node.name = "WaitForever"
+	return node
 }
 
 weak :: proc(
@@ -1287,6 +1287,21 @@ weak :: proc(
 }
 
 named :: proc(node: ^Node, name: string) -> ^Node {
-	if node != nil do node.user_name = name
+	if node != nil {
+		if node.dbg != nil {
+			node.dbg.user_name = name
+		} else {
+			node.dbg = new(Node_Debug_Info, context.allocator)
+			node.dbg.user_name = name
+		}
+	}
 	return node
+}
+
+// Internal helper for scopes
+diagnostics_init_node_auto :: proc(node: ^Node, is_scope: bool) {
+	if node.dbg == nil {
+		node.dbg = new(Node_Debug_Info, context.allocator)
+	}
+	node.dbg.is_scope = is_scope
 }

@@ -116,16 +116,16 @@ wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 		p := (^Payload)(d); return find_enemy(p.game, p.id) != nil
 	}
 
-	return managed(weak(
-		named(seq(
-			named(sync(
+	res := managed(weak(
+		seq(
+			sync(
 				run(proc(d: rawptr) -> bool {
 					p := (^Payload)(d)
-					find_enemy(p.game, p.id).telegraph_timer = 0.8
+					if e := find_enemy(p.game, p.id); e != nil do e.telegraph_timer = 0.8
 					return true
 				}, p),
 				named(wait(0.8), "Telegraph Timer")
-			), "Telegraph Phase"),
+			),
 			named(run(proc(d: rawptr) -> bool {
 				p := (^Payload)(d)
 				e := find_enemy(p.game, p.id)
@@ -142,7 +142,10 @@ wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 					},
 				)
 				return true
-		}, p), "Shoot Fireball")), "Wizard Attack"), is_alive, p), p)
+		}, p), "Shoot Fireball")), is_alive, p), p)
+
+	named(res, "Wizard Attack")
+	return res
 }
 
 // Dash attack for Elites (Protected by Weak + Semaphore)
@@ -160,7 +163,7 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 		return find_enemy(p.game, p.id) != nil
 	}
 
-	return managed(weak(
+	res := managed(weak(
 		semaphore_scope(&game.charge_semaphore, // only allows two elites to run this dash
 			named(seq(
 				named(run(proc(d: rawptr) -> bool { // start charge
@@ -181,6 +184,9 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 					return true
 			}, p), "End Dash")), "Elite Dash Sequence")
 		), is_alive, p), p)
+
+	named(res, "Elite Charge Behavior")
+	return res
 }
 
 // Visual "Pop" effect (Spawned via Fork)
@@ -192,9 +198,7 @@ death_pop_behavior :: proc(game: ^Game_World, pos: [2]f32) -> ^Node {
 
 	append(&game.pop_effects, p)
 
-	// don't delete payload here with managed, executor can delete pop_effect quicker
-	// than animation happens in main loop causing dangling pointer
-	return fork(
+	res := fork(
 			named(seq(
 				named(tween(0.0, 30.0, 0.8, &p.radius, ease_in_out_elastic), "Expand"),
 				named(tween(30.0, 0.0, 0.4, &p.radius, ease_in_out_cubic), "Contract"),
@@ -204,6 +208,9 @@ death_pop_behavior :: proc(game: ^Game_World, pos: [2]f32) -> ^Node {
 					return true
 				}, p)
 			), "Pop Animation"))
+
+	named(res, "Death Pop Behavior")
+	return res
 }
 
 whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
@@ -214,7 +221,7 @@ whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 	}
 
 	p := new(Weapon_Payload); p.game = game; p.weapon = weapon
-	return managed(named(loop(
+	res := managed(loop(
 		named(seq(
 			named(wait_ptr(&weapon.cooldown), "Whip Cooldown"),
 			named(run(proc(d: rawptr) -> bool {
@@ -225,7 +232,10 @@ whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 				p.game.player.whip_flash_timer = 0.15
 				return true
 			}, p), "Whip Slash")
-		), "Whip Sequence")), "Whip Behavior"), p)
+		), "Whip Cycle")), p)
+
+	named(res, "Whip Weapon Behavior")
+	return res
 }
 
 fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
@@ -238,7 +248,7 @@ fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 	p := new(Weapon_Payload)
 	p.game = game
 	p.weapon = weapon
-	return managed(named(loop(
+	res := managed(loop(
 		named(seq(
 			named(wait_ptr(&weapon.cooldown), "Fireball Cooldown"),
 			named(run(proc(d: rawptr) -> bool {
@@ -263,11 +273,14 @@ fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> ^Node {
 				})
 				return true
 			}, p), "Launch Fireball")
-		), "Fireball Sequence")), "Fireball Behavior"), p)
+		), "Fireball Cycle")), p)
+
+	named(res, "Fireball Weapon Behavior")
+	return res
 }
 
 level_up_sequence :: proc(game: ^Game_World) -> ^Node {
-	return named(seq(
+	res := named(seq(
 		named(run(proc(d: rawptr) -> bool { // pause game
 			g := (^Game_World)(d)
 			g.is_paused = true
@@ -298,10 +311,11 @@ level_up_sequence :: proc(game: ^Game_World) -> ^Node {
 			(^Game_World)(d).is_paused = false
 			return true
 		}, game), "Unpause Game")), "Level Up Sequence")
+	return res
 }
 
 shield_behavior :: proc(game: ^Game_World, duration: f32) -> ^Node {
-	return named(seq(
+	res := named(seq(
 		named(run(
 			proc(d: rawptr) -> bool {(^Game_World)(d).player.shield_active = true; return true},
 			game,
@@ -313,10 +327,11 @@ shield_behavior :: proc(game: ^Game_World, duration: f32) -> ^Node {
 			game,
 		), "Deactivate Shield"),
 	), "Shield Behavior")
+	return res
 }
 
 super_attack_behavior :: proc(game: ^Game_World) -> ^Node {
-	return named(seq(
+	res := named(seq(
 		named(sync(named(apply_camera_shake(game, 15.0), "Shake Camera"), named(wait(0.5), "Charge Delay")), "Charge Phase"),
 		named(run(proc(d: rawptr) -> bool {
 			g := (^Game_World)(d)
@@ -334,6 +349,7 @@ super_attack_behavior :: proc(game: ^Game_World) -> ^Node {
 			}
 			return true
 		}, game), "Radial Burst")), "Super Attack")
+	return res
 }
 
 apply_camera_shake :: proc(game: ^Game_World, amount: f32) -> ^Node {
@@ -370,7 +386,7 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 			},
 		)
 	}
-	return named(loop(named(seq(
+	res := named(loop(named(seq(
 			named(select(
 				named(seq(named(check(proc(d: rawptr) -> bool {
 							g := (^Game_World)(d)
@@ -398,22 +414,7 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 				), "Normal Spawn Branch")
 			), "Spawn Logic")
 		), "Spawner Main Loop")), "Enemy Spawner Behavior")
-}
-
-diagnostics_db_prune :: proc(db: ^Diagnostics_DB, current_time: f64, fade_duration: f64) {
-	if db == nil do return
-	to_remove := make([dynamic]rawptr, context.temp_allocator)
-	for id, &entry in db.entries {
-		if entry.end_time > 0 && current_time - entry.end_time > fade_duration {
-			append(&to_remove, id)
-		}
-	}
-	for id in to_remove {
-		if entry, found := db.entries[id]; found {
-			if len(entry.info) > 0 do delete(entry.info, db.allocator)
-			delete_key(&db.entries, id)
-		}
-	}
+	return res
 }
 
 get_status_color :: proc(status: Status) -> rl.Color {
@@ -437,14 +438,22 @@ get_status_color :: proc(status: Status) -> rl.Color {
 render_coroutine_debugger :: proc(game: ^Game_World) {
 	if !game.diagnostics.enabled do return
 
-	// Continuous memory maintenance: prune finished nodes even if UI is hidden
-	if !game.debug_paused {
-		diagnostics_db_prune(&game.diagnostics, game.sys_exec.total_time, 0.5)
+	// clear memory
+	to_remove := make([dynamic]int, context.temp_allocator)
+	for f, i in game.diagnostics.fading_nodes {
+		if game.sys_exec.total_time - f.end_time > 0.5 {
+			append(&to_remove, i)
+		}
+	}
+	#reverse for idx in to_remove {
+		f := game.diagnostics.fading_nodes[idx]
+		if len(f.info) > 0 do delete(f.info, game.diagnostics.allocator)
+		ordered_remove(&game.diagnostics.fading_nodes, idx)
 	}
 
 	if !game.debug_visible do return
 
-	W_W :: 400
+	W_W :: 300
 	W_X :: W_WIDTH - W_W
 
 	rl.DrawRectangle(W_X, 0, W_W, W_HEIGHT, rl.Fade(rl.BLACK, 0.85))
@@ -475,39 +484,36 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 		rl.DrawText(rl.TextFormat("FILTER: %s", filter_str), W_X + 10, W_HEIGHT - 20, 12, rl.SKYBLUE)
 	}
 
-	// Simple key-based filtering
-	// TODO: text input field
+	line_index := 0
 
-	// Build adjacency list
-	Children_Map :: map[rawptr][dynamic]rawptr
-	children := make(Children_Map, context.temp_allocator)
-	roots := make([dynamic]rawptr, context.temp_allocator)
-
-	for id, entry in game.diagnostics.entries {
-		if entry.parent_id == nil {
-			append(&roots, id)
-		} else {
-			if entry.parent_id not_in children {
-				children[entry.parent_id] = make([dynamic]rawptr, context.temp_allocator)
-			}
-			append(&children[entry.parent_id], id)
-		}
+	// Traversal
+	roots := make([dynamic]^Node, context.temp_allocator)
+	for info in game.exec.active_nodes {
+		if info.node != nil && info.parent == nil do append(&roots, info.node)
+	}
+	for info in game.exec.suspended_nodes {
+		if info.node != nil && info.parent == nil do append(&roots, info.node)
+	}
+	for info in game.sys_exec.active_nodes {
+		if info.node != nil && info.parent == nil do append(&roots, info.node)
+	}
+	for info in game.sys_exec.suspended_nodes {
+		if info.node != nil && info.parent == nil do append(&roots, info.node)
 	}
 
-	line_index := 0
-	render_entry :: proc(game: ^Game_World, id: rawptr, children: ^Children_Map, depth: int, y: ^i32, line_index: ^int, filter: string) {
-		entry := game.diagnostics.entries[id]
+	render_node :: proc(game: ^Game_World, node: ^Node, depth: int, y: ^i32, line_index: ^int, filter: string) {
+		if node == nil || node.dbg == nil do return
 
 		should_render := true
 		if game.debug_compact {
-			if !entry.is_leaf && !entry.is_scope {
+			if !node.dbg.is_leaf && !node.dbg.is_scope {
 				should_render = false
 			}
 		}
 
 		// Substring filter
 		if len(filter) > 0 {
-			name_lower := strings.to_lower(entry.name, context.temp_allocator)
+			name_lower := strings.to_lower(node.name, context.temp_allocator)
 			filter_lower := strings.to_lower(filter, context.temp_allocator)
 			if !strings.contains(name_lower, filter_lower) {
 				should_render = false
@@ -516,43 +522,74 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 
 		if should_render {
 			if line_index^ >= game.debug_scroll {
-				color := get_status_color(entry.status)
-				if entry.end_time > 0 {
-					alpha := 1.0 - f32(game.sys_exec.total_time - entry.end_time) / 0.5
-					color = rl.Fade(color, alpha)
-				}
-
+				color := get_status_color(node.status)
 				indent := i32(depth * 10)
-				prefix := entry.is_leaf ? "  " : "v "
-				if entry.status == .Suspended do prefix = "> "
+				prefix := node.dbg.is_leaf ? "  " : "v "
+				if node.status == .Suspended do prefix = "> "
 
-				display_name := entry.name
-				if len(entry.user_name) > 0 {
-					display_name = string(rl.TextFormat("%s (%s)", entry.user_name, entry.name))
+				display_name := node.name
+				if len(node.dbg.user_name) > 0 {
+					display_name = string(rl.TextFormat("%s (%s)", node.dbg.user_name, node.name))
 				}
 
 				text := rl.TextFormat("%s%s", prefix, display_name)
-				if len(entry.info) > 0 {
-					text = rl.TextFormat("%s : %s", text, entry.info)
+				if node.dbg.info_len > 0 {
+					info_str := string(node.dbg.info_buf[:node.dbg.info_len])
+					text = rl.TextFormat("%s : %s", text, info_str)
 				}
 
 				if y^ < W_HEIGHT - 30 {
-					rl.DrawText(text, W_X + 10 + indent, y^, 12, color)
+					rl.DrawText(text, i32(W_WIDTH - 300 + 10 + indent), y^, 12, color)
 					y^ += 12
 				}
 			}
 			line_index^ += 1
 		}
 
-		if id in children {
-			for cid in children[id] {
-				render_entry(game, cid, children, should_render ? depth + 1 : depth, y, line_index, filter)
-			}
+		child_depth := should_render ? depth + 1 : depth
+
+		// Intrusive children access based on node type
+		switch node.name {
+		case "Sequence": s := (^Sequence_Node)(node); for c in s.children do render_node(game, c, child_depth, y, line_index, filter)
+		case "Select": s := (^Select_Node)(node); for c in s.children do render_node(game, c, child_depth, y, line_index, filter)
+		case "OptionalSequence": s := (^Optional_Sequence_Node)(node); for c in s.children do render_node(game, c, child_depth, y, line_index, filter)
+		case "Sync": s := (^Sync_Node)(node); for c in s.children do render_node(game, c, child_depth, y, line_index, filter)
+		case "Race": s := (^Race_Node)(node); for c in s.children do render_node(game, c, child_depth, y, line_index, filter)
+		case "Loop": l := (^Loop_Node)(node); render_node(game, l.child, child_depth, y, line_index, filter)
+		case "Scope": s := (^Scope_Node)(node); render_node(game, s.child, child_depth, y, line_index, filter)
+		case "Managed": m := (^Managed_Node)(node); render_node(game, m.child, child_depth, y, line_index, filter)
+		case "Weak": w := (^Weak_Node)(node); render_node(game, w.child, child_depth, y, line_index, filter)
+		case "Not": n := (^Not_Node)(node); render_node(game, n.child, child_depth, y, line_index, filter)
+		case "Catch": c := (^Catch_Node)(node); render_node(game, c.child, child_depth, y, line_index, filter)
+		case "CaptureReturn": c := (^Capture_Return_Node)(node); render_node(game, c.child, child_depth, y, line_index, filter)
+		case "Semaphore": s := (^Semaphore_Handler_Node)(node); render_node(game, s.child, child_depth, y, line_index, filter)
+		case "Fork": f := (^Fork_Node)(node); render_node(game, f.child, child_depth, y, line_index, filter)
 		}
 	}
 
 	for root in roots {
-		render_entry(game, root, &children, 0, &y, &line_index, filter_str)
+		render_node(game, root, 0, &y, &line_index, filter_str)
+	}
+
+	for f in game.diagnostics.fading_nodes {
+		if line_index >= game.debug_scroll {
+			alpha := 1.0 - f32(game.sys_exec.total_time - f.end_time) / 0.5
+			color := rl.Fade(get_status_color(f.status), alpha)
+			indent := i32(f.depth * 10)
+			display_name := f.name
+			if len(f.user_name) > 0 {
+				display_name = string(rl.TextFormat("%s (%s)", f.user_name, f.name))
+			}
+			text := rl.TextFormat("v %s", display_name)
+			if len(f.info) > 0 {
+				text = rl.TextFormat("%s : %s", text, f.info)
+			}
+			if y < W_HEIGHT - 30 {
+				rl.DrawText(text, i32(W_WIDTH - 300 + 10 + indent), y, 12, color)
+				y += 12
+			}
+		}
+		line_index += 1
 	}
 }
 
@@ -634,11 +671,11 @@ main :: proc() {
 			gw.diagnostics.enabled = gw.debug_visible
 			if !gw.diagnostics.enabled {
 				// clean memory
-				for id, &entry in gw.diagnostics.entries {
-					if len(entry.info) > 0 do delete(entry.info, gw.diagnostics.allocator)
+				for &f in gw.diagnostics.fading_nodes {
+					if len(f.info) > 0 do delete(f.info, gw.diagnostics.allocator)
 				}
-				delete(gw.diagnostics.entries)
-				gw.diagnostics.entries = make(map[rawptr]Debug_Node, 16, gw.diagnostics.allocator)
+				delete(gw.diagnostics.fading_nodes)
+				gw.diagnostics.fading_nodes = make([dynamic]Fading_Node, 0, 128, gw.diagnostics.allocator)
 				executor_shrink(&gw.exec)
 				executor_shrink(&gw.sys_exec)
 			}
@@ -649,11 +686,6 @@ main :: proc() {
 			gw.is_paused = gw.debug_paused
 		}
 		if rl.IsKeyPressed(.F4) do mem.set(&gw.debug_filter, 0, len(gw.debug_filter))
-
-		// Sample filter for testing
-		if rl.IsKeyPressed(.F12) {
-			copy(gw.debug_filter[:], "wait")
-		}
 
 		if !gw.is_paused {
 			// Player Movement
