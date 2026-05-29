@@ -436,17 +436,20 @@ select_vtable := Node_VTable {
 	},
 }
 
-Callback_Proc :: proc(data: rawptr) -> bool
-
 Callback_Node :: struct {
-	using node: Node,
-	callback:   Callback_Proc,
-	payload:    rawptr,
+	using node:   Node,
+	callback_ptr: rawptr,
+	payload:      rawptr,
+	thunk:        proc(cb: rawptr, p: rawptr) -> bool, // Type-erased
 }
 
 callback_vtable := Node_VTable {
 	start = proc(self: ^Node, exec: ^Executor) -> Status {
-		c := (^Callback_Node)(self); return c.callback(c.payload) ? .Completed : .Failed
+		c := (^Callback_Node)(self)
+		if c.thunk != nil {
+			return c.thunk(c.callback_ptr, c.payload) ? .Completed : .Failed
+		}
+		return .Failed
 	},
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Completed},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {},
@@ -1133,12 +1136,23 @@ wait_ptr :: proc(duration: ^f32, allocator := context.allocator) -> ^Node {
 }
 
 run :: proc(
-	callback: Callback_Proc,
-	payload: rawptr = nil,
+	callback: proc(payload: ^$T) -> bool,
+	payload: ^T = nil,
 	allocator := context.allocator,
 ) -> ^Node {
-	node := new(Callback_Node, allocator); node.base = &callback_vtable
-	node.callback = callback; node.payload = payload; node.name = "Callback"
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr) -> bool {
+		typed_callback := (proc(payload: ^T) -> bool)(cb)
+		typed_payload := (^T)(p)
+		return typed_callback(typed_payload)
+	}
+
+	node := new(Callback_Node, allocator)
+	node.base = &callback_vtable
+	node.callback_ptr = rawptr(callback)
+	node.payload = rawptr(payload)
+	node.thunk = thunk_wrapper
+	node.name = "Callback"
 	return node
 }
 
@@ -1171,12 +1185,23 @@ wait_until :: proc(
 }
 
 check :: proc(
-	condition: proc(_: rawptr) -> bool,
-	payload: rawptr = nil,
+	callback: proc(_: ^$T) -> bool,
+	payload: ^T = nil,
 	allocator := context.allocator,
 ) -> ^Node {
-	node := new(Callback_Node, allocator); node.base = &callback_vtable
-	node.callback = condition; node.payload = payload; node.name = "Check"
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr) -> bool {
+		typed_callback := (proc(payload: ^T) -> bool)(cb)
+		typed_payload := (^T)(p)
+		return typed_callback(typed_payload)
+	}
+
+	node := new(Callback_Node, allocator)
+	node.base = &callback_vtable
+	node.callback_ptr = rawptr(callback)
+	node.payload = rawptr(payload)
+	node.thunk = thunk_wrapper
+	node.name = "Check"
 	return node
 }
 
@@ -1212,8 +1237,8 @@ managed :: proc(child: ^Node, payload: rawptr, allocator := context.allocator) -
 }
 
 managed_run :: proc(
-	callback: Callback_Proc,
-	payload: rawptr,
+	callback: proc(payload: ^$T) -> bool,
+	payload: ^T = nil,
 	allocator := context.allocator,
 ) -> ^Node {
 	child := run(callback, payload, allocator)
@@ -1261,13 +1286,15 @@ semaphore_scope :: proc(sem: ^Semaphore, child: ^Node, allocator := context.allo
 	return node
 }
 
+/*
 nop :: proc(allocator := context.allocator) -> ^Node {
-	return run(proc(_: rawptr) -> bool {return true}, nil, allocator)
+	return run(proc(p: int) -> bool {return true}, 42, allocator)
 }
 
 fail :: proc(allocator := context.allocator) -> ^Node {
 	return run(proc(_: rawptr) -> bool {return false}, nil, allocator)
 }
+*/
 
 fork :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 	node := new(Fork_Node, allocator); node.base = &fork_vtable; node.child = child
