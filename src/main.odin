@@ -121,8 +121,8 @@ wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 	p.game = game
 	p.id = enemy_id
 
-	is_alive :: proc(d: rawptr) -> bool {
-		p := (^Payload)(d); return find_enemy(p.game, p.id) != nil
+	is_alive :: proc(p: ^Payload) -> bool {
+		return find_enemy(p.game, p.id) != nil
 	}
 
 	res := managed(weak(
@@ -165,8 +165,7 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> ^Node {
 	p.game = game
 	p.id = enemy_id
 
-	is_alive :: proc(d: rawptr) -> bool {
-		p := (^Payload)(d)
+	is_alive :: proc(p: ^Payload) -> bool {
 		return find_enemy(p.game, p.id) != nil
 	}
 
@@ -289,8 +288,7 @@ level_up_sequence :: proc(game: ^Game_World) -> ^Node {
 			return true
 		}, game), "Pause Game"),
 		named(tween(0.0, 1.0, 0.4, &game.level_up_scale, ease_in_out_cubic), "Show Shop UI"),
-		named(wait_until(proc(d: rawptr) -> bool { // until upgrade is not selected, waits here
-			g := (^Game_World)(d)
+		named(wait_until(proc(g: ^Game_World) -> bool { // until upgrade is not selected, waits here
 			if k2.key_went_down(.N1) {
 				for &w in g.player.weapons do w.cooldown *= 0.8
 				return true
@@ -423,19 +421,18 @@ spawner_behavior :: proc(game: ^Game_World) -> ^Node {
 							g.boss_fight = true // lock spawning of mobs until boss is defeated
 							boss := spawn(g, .Boss)
 							enqueue_node(&g.sys_exec, apply_camera_shake(g, 10.0))
-							enqueue_node(&g.sys_exec, boss_ai_timeline(g, boss.boss_state))
+							enqueue_node(&g.exec, boss_ai_timeline(g, boss.boss_state))
 							return true
 						}, game), "Spawn Boss"),
-					named(wait_until(proc(d: rawptr) -> bool {
-						g := (^Game_World)(d)
+					named(wait_until(proc(g: ^Game_World) -> bool {
 						return g.boss_fight == false
 					}, game), "Boss Fight Defeated?")
 				), "Boss Spawn Branch"),
 				named(seq(
 					named(race(
 						named(wait(3.0), "Spawn Interval"),
-						named(wait_until(proc(d: rawptr) -> bool {
-							return (^Game_World)(d).player.health < 30
+						named(wait_until(proc(g: ^Game_World) -> bool {
+							return g.player.health < 30
 						}, game), "Urgent Spawn Trigger")
 					), "Normal Wait"),
 					named(run(proc(g: ^Game_World) -> bool {
@@ -456,7 +453,7 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> ^Node {
 		boss: ^Boss_State,
 	}
 
-	p := new(Boss_AI_Payload, game.sys_exec.allocator)
+	p := new(Boss_AI_Payload, game.exec.allocator)
 	p.game = game
 	p.boss = boss
 
@@ -467,8 +464,7 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> ^Node {
 			// phase 1 - attack loop,
 			race(
 				// trigger for phase 2, if boss hp is below 400
-				wait_until(proc(data: rawptr) -> bool {
-					p := (^Boss_AI_Payload)(data)
+				wait_until(proc(p: ^Boss_AI_Payload) -> bool {
 					e := find_enemy(p.game, p.boss.self_enemy_id)
 					return e != nil && e.health < 400
 				}, p),
@@ -547,8 +543,7 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> ^Node {
 						return true
 					}, p)),
 					// cleanup scope, deactivate shield
-					on_exit = proc(data: rawptr, status: Status) {
-						b := (^Boss_AI_Payload)(data)
+					on_exit = proc(b: ^Boss_AI_Payload, status: Status) {
 						b.boss.shield_active = false
 						b.boss.shield_power = 0.0
 					},
@@ -604,8 +599,7 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> ^Node {
 			),
 		),
 		// global cleanup scope, reset visual scale, properties for boss state?
-		on_exit = proc(data: rawptr, status: Status) {
-			b := (^Boss_AI_Payload)(data)
+		on_exit = proc(b: ^Boss_AI_Payload, status: Status) {
 			b.boss.visual_scale = 1.0
 			b.boss.shield_active = false
 			b.boss.shield_power = 0.0

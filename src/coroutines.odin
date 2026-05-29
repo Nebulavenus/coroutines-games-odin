@@ -641,15 +641,20 @@ tween_vtable := Node_VTable {
 }
 
 Condition_Node :: struct {
-	using node: Node,
-	condition:  proc(_: rawptr) -> bool,
-	payload:    rawptr,
+	using node:    Node,
+	condition_ptr: rawptr,
+	payload:       rawptr,
+	thunk:  	   proc(cb: rawptr, p: rawptr) -> bool,
 }
 
 condition_vtable := Node_VTable {
 	start = proc(self: ^Node, exec: ^Executor) -> Status {return .Running},
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
-		c := (^Condition_Node)(self); return c.condition(c.payload) ? .Completed : .Running
+		c := (^Condition_Node)(self)
+		if c.thunk != nil {
+			return c.thunk(c.condition_ptr, c.payload) ? .Completed : .Running
+		}
+		return .Failed
 	},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {},
 	on_child_stopped = proc(
@@ -663,23 +668,26 @@ condition_vtable := Node_VTable {
 }
 
 Scope_Node :: struct {
-	using node: Node,
-	child:      ^Node,
-	on_exit:    proc(data: rawptr, status: Status),
-	payload:    rawptr,
+	using node:  Node,
+	child:       ^Node,
+	on_exit_ptr: rawptr,
+	payload:     rawptr,
+	thunk:  	 proc(cb: rawptr, p: rawptr, status: Status),
 }
 
 scope_vtable := Node_VTable {
 	start = proc(self: ^Node, exec: ^Executor) -> Status {
-		s := (^Scope_Node)(self); enqueue_node(exec, s.child, s); return .Suspended
+		s := (^Scope_Node)(self)
+		enqueue_node(exec, s.child, s)
+		return .Suspended
 	},
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {return .Suspended},
 	end = proc(self: ^Node, exec: ^Executor, status: Status) {
 		s := (^Scope_Node)(self)
 		// run once
-		if s.on_exit != nil {
-			s.on_exit(s.payload, status)
-			s.on_exit = nil
+		if s.thunk != nil {
+			s.thunk(s.on_exit_ptr, s.payload, status)
+			s.thunk = nil
 		}
 		if status == .Aborted && (s.child.status == .Running || s.child.status == .Suspended) {
 			abort_node(exec, s.child)
@@ -694,9 +702,9 @@ scope_vtable := Node_VTable {
 	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return ""},
 	destroy = proc(self: ^Node, exec: ^Executor) {
 		s := (^Scope_Node)(self)
-		if s.on_exit != nil {
-			s.on_exit(s.payload, .Aborted)
-			s.on_exit = nil
+		if s.thunk != nil {
+			s.thunk(s.on_exit_ptr, s.payload, .Aborted)
+			s.thunk = nil
 		}
 		destroy_node(s.child, exec)
 		free(s, exec.allocator)
@@ -1049,22 +1057,23 @@ wait_forever_vtable := Node_VTable {
 }
 
 Weak_Node :: struct {
-	using node: Node,
-	child:      ^Node,
-	is_valid:   proc(_: rawptr) -> bool,
-	payload:    rawptr,
+	using node:   Node,
+	child:        ^Node,
+	is_valid_ptr: rawptr,
+	payload:      rawptr,
+	thunk:        proc(cb: rawptr, p: rawptr) -> bool,
 }
 
 weak_vtable := Node_VTable {
 	start = proc(self: ^Node, exec: ^Executor) -> Status {
 		w := (^Weak_Node)(self)
-		if !w.is_valid(w.payload) do return .Failed
+		if w.thunk != nil && !w.thunk(w.is_valid_ptr, w.payload) do return .Failed
 		enqueue_node(exec, w.child, w)
 		return .Running
 	},
 	update = proc(self: ^Node, exec: ^Executor, dt: f32) -> Status {
 		w := (^Weak_Node)(self)
-		if !w.is_valid(w.payload) {
+		if w.thunk != nil && !w.thunk(w.is_valid_ptr, w.payload) {
 			abort_node(exec, w.child)
 			return .Failed
 		}
@@ -1088,7 +1097,9 @@ weak_vtable := Node_VTable {
 	},
 	get_debug_info = proc(self: ^Node, buf: []byte) -> string {return "Guarding..."},
 	destroy = proc(self: ^Node, exec: ^Executor) {
-		w := (^Weak_Node)(self); destroy_node(w.child, exec); free(self, exec.allocator)
+		w := (^Weak_Node)(self)
+		destroy_node(w.child, exec)
+		free(self, exec.allocator)
 	},
 }
 
@@ -1135,7 +1146,7 @@ wait_ptr :: proc(duration: ^f32, allocator := context.allocator) -> ^Node {
 	return node
 }
 
-run :: proc(
+run_typed :: proc(
 	callback: proc(payload: ^$T) -> bool,
 	payload: ^T = nil,
 	allocator := context.allocator,
@@ -1156,6 +1167,27 @@ run :: proc(
 	return node
 }
 
+run_nil :: proc(
+	callback: proc() -> bool,
+	allocator := context.allocator,
+) -> ^Node {
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr) -> bool {
+		typed_callback := (proc() -> bool)(cb)
+		return typed_callback()
+	}
+
+	node := new(Callback_Node, allocator)
+	node.base = &callback_vtable
+	node.callback_ptr = rawptr(callback)
+	node.payload = nil
+	node.thunk = thunk_wrapper
+	node.name = "Callback"
+	return node
+}
+
+run :: proc {run_nil, run_typed}
+
 loop :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 	node := new(Loop_Node, allocator); node.base = &loop_vtable; node.child = child
 	node.name = "Loop"; return node
@@ -1174,15 +1206,47 @@ tween :: proc(
 	return node
 }
 
-wait_until :: proc(
-	condition: proc(_: rawptr) -> bool,
-	payload: rawptr = nil,
+wait_until_typed :: proc(
+	condition: proc(payload: ^$T) -> bool,
+	payload: ^T = nil,
 	allocator := context.allocator,
 ) -> ^Node {
-	node := new(Condition_Node, allocator); node.base = &condition_vtable
-	node.condition = condition; node.payload = payload; node.name = "WaitUntil"
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr) -> bool {
+		typed_condition := (proc(payload: ^T) -> bool)(cb)
+		typed_payload := (^T)(p)
+		return typed_condition(typed_payload)
+	}
+
+	node := new(Condition_Node, allocator)
+	node.base = &condition_vtable
+	node.condition_ptr = rawptr(condition)
+	node.payload = rawptr(payload)
+	node.thunk = thunk_wrapper
+	node.name = "WaitUntil"
 	return node
 }
+
+wait_until_nil :: proc(
+	condition: proc() -> bool,
+	allocator := context.allocator,
+) -> ^Node {
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr) -> bool {
+		typed_condition := (proc() -> bool)(cb)
+		return typed_condition()
+	}
+
+	node := new(Condition_Node, allocator)
+	node.base = &condition_vtable
+	node.condition_ptr = rawptr(condition)
+	node.payload = nil
+	node.thunk = thunk_wrapper
+	node.name = "WaitUntil"
+	return node
+}
+
+wait_until :: proc{wait_until_typed, wait_until_nil}
 
 check :: proc(
 	callback: proc(_: ^$T) -> bool,
@@ -1205,18 +1269,53 @@ check :: proc(
 	return node
 }
 
-scope :: proc(
+scope_typed :: proc(
 	child: ^Node,
-	on_exit: proc(_: rawptr, _: Status),
-	payload: rawptr = nil,
+	on_exit: proc(paylod: ^$T, status: Status),
+	payload: ^T = nil,
 	allocator := context.allocator,
 ) -> ^Node {
-	node := new(Scope_Node, allocator); node.base = &scope_vtable
-	node.child = child; node.on_exit = on_exit; node.payload = payload
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr, status: Status) {
+		typed_on_exit := (proc(payload: ^T, status: Status))(cb)
+		typed_payload := (^T)(p)
+		typed_on_exit(typed_payload, status)
+	}
+
+	node := new(Scope_Node, allocator)
+	node.base = &scope_vtable
+	node.child = child
+	node.on_exit_ptr = rawptr(on_exit)
+	node.payload = rawptr(payload)
+	node.thunk = thunk_wrapper
 	node.name = "Scope"
 	diagnostics_init_node_auto(node, is_scope = true)
 	return node
 }
+
+scope_nil :: proc(
+	child: ^Node,
+	on_exit: proc(status: Status),
+	allocator := context.allocator,
+) -> ^Node {
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr, status: Status) {
+		typed_on_exit := (proc(status: Status))(cb)
+		typed_on_exit(status)
+	}
+
+	node := new(Scope_Node, allocator)
+	node.base = &scope_vtable
+	node.child = child
+	node.on_exit_ptr = rawptr(on_exit)
+	node.payload = nil
+	node.thunk = thunk_wrapper
+	node.name = "Scope"
+	diagnostics_init_node_auto(node, is_scope = true)
+	return node
+}
+
+scope :: proc {scope_typed, scope_nil}
 
 not :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 	node := new(Not_Node, allocator); node.base = &not_vtable; node.child = child
@@ -1286,15 +1385,13 @@ semaphore_scope :: proc(sem: ^Semaphore, child: ^Node, allocator := context.allo
 	return node
 }
 
-/*
 nop :: proc(allocator := context.allocator) -> ^Node {
-	return run(proc(p: int) -> bool {return true}, 42, allocator)
+	return run(proc() -> bool {return true}, allocator)
 }
 
 fail :: proc(allocator := context.allocator) -> ^Node {
-	return run(proc(_: rawptr) -> bool {return false}, nil, allocator)
+	return run(proc() -> bool {return false}, allocator)
 }
-*/
 
 fork :: proc(child: ^Node, allocator := context.allocator) -> ^Node {
 	node := new(Fork_Node, allocator); node.base = &fork_vtable; node.child = child
@@ -1307,16 +1404,51 @@ wait_forever :: proc(allocator := context.allocator) -> ^Node {
 	return node
 }
 
-weak :: proc(
+weak_typed :: proc(
 	child: ^Node,
-	is_valid: proc(_: rawptr) -> bool,
-	payload: rawptr,
+	is_valid: proc(payload: ^$T) -> bool,
+	payload: ^T = nil,
 	allocator := context.allocator,
 ) -> ^Node {
-	node := new(Weak_Node, allocator); node.base = &weak_vtable
-	node.child = child; node.is_valid = is_valid; node.payload = payload
-	node.name = "Weak"; return node
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr) -> bool {
+		typed_is_valid := (proc(payload: ^T) -> bool)(cb)
+		typed_payload := (^T)(p)
+		return typed_is_valid(typed_payload)
+	}
+
+	node := new(Weak_Node, allocator);
+	node.base = &weak_vtable
+	node.child = child
+	node.is_valid_ptr = rawptr(is_valid)
+	node.payload = rawptr(payload)
+	node.thunk = thunk_wrapper
+	node.name = "Weak"
+	return node
 }
+
+weak_nil :: proc(
+	child: ^Node,
+	is_valid: proc() -> bool,
+	allocator := context.allocator,
+) -> ^Node {
+
+	thunk_wrapper :: proc(cb: rawptr, p: rawptr) -> bool {
+		typed_is_valid := (proc() -> bool)(cb)
+		return typed_is_valid()
+	}
+
+	node := new(Weak_Node, allocator);
+	node.base = &weak_vtable
+	node.child = child
+	node.is_valid_ptr = rawptr(is_valid)
+	node.payload = nil
+	node.thunk = thunk_wrapper
+	node.name = "Weak"
+	return node
+}
+
+weak :: proc{ weak_typed, weak_nil }
 
 named :: proc(node: ^Node, name: string) -> ^Node {
 	if node != nil {

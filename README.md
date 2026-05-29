@@ -33,8 +33,7 @@ main :: proc() {
     // wait 1.5s -> increase score -> apply tween 2s, to move player up
     my_task := seq(
         wait(1.5),
-        run(proc(data: rawptr) -> bool {
-            s := (^Game_State)(data)
+        run(proc(s: ^Game_State) -> bool {
             s.player_score += 100
             fmt.println("Score increased!")
             return true

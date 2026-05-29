@@ -162,8 +162,7 @@ test_scope_cleanup :: proc(t: ^testing.T) {
 	ctx: Test_Context
 	reset_context(&ctx)
 
-	cleanup_callback :: proc(data: rawptr, status: Status) {
-		c := (^Test_Context)(data)
+	cleanup_callback :: proc(c: ^Test_Context, status: Status) {
 		c.cleanup_val = status
 	}
 
@@ -187,8 +186,7 @@ test_scope_cleanup_on_abort :: proc(t: ^testing.T) {
 	ctx: Test_Context
 	reset_context(&ctx)
 
-	cleanup_callback :: proc(data: rawptr, status: Status) {
-		c := (^Test_Context)(data)
+	cleanup_callback :: proc(c: ^Test_Context, status: Status) {
 		c.cleanup_val = status
 	}
 
@@ -232,8 +230,8 @@ test_wait_until :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	condition_met := false
-	check_condition :: proc(data: rawptr) -> bool {
-		return (^bool)(data)^
+	check_condition :: proc(data: ^bool) -> bool {
+		return data^
 	}
 
 	node := seq(wait_until(check_condition, &condition_met), run(complete_action, &ctx))
@@ -292,8 +290,7 @@ test_nested_aborts :: proc(t: ^testing.T) {
 	ctx: Test_Context
 	reset_context(&ctx)
 
-	cleanup_callback :: proc(data: rawptr, status: Status) {
-		c := (^Test_Context)(data)
+	cleanup_callback :: proc(c: ^Test_Context, status: Status) {
 		c.cleanup_val = status
 	}
 
@@ -322,8 +319,8 @@ test_wait_until_with_zero_dt :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	condition := false
-	check_cond :: proc(data: rawptr) -> bool {
-		return (^bool)(data)^
+	check_cond :: proc(data: ^bool) -> bool {
+		return data^
 	}
 
 	node := seq(wait_until(check_cond, &condition), run(complete_action, &ctx))
@@ -359,7 +356,7 @@ test_wait_frames :: proc(t: ^testing.T) {
 	executor_step(&exec, 0.0) // Frame 3
 	testing.expect_value(t, ctx.was_completed, true)
 }
-/*
+
 @(test)
 test_capture_return :: proc(t: ^testing.T) {
 	exec: Executor
@@ -367,14 +364,14 @@ test_capture_return :: proc(t: ^testing.T) {
 	defer executor_destroy(&exec)
 
 	res: bool
-	node := capture_return(run(proc(_: nil) -> bool {return false}), &res)
+	node := capture_return(run(proc() -> bool {return false}), &res)
 	enqueue_node(&exec, node)
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, res, false)
 
 	res = false
-	node2 := capture_return(run(proc(_: rawptr) -> bool {return true}), &res)
+	node2 := capture_return(run(proc() -> bool {return true}), &res)
 	enqueue_node(&exec, node2)
 
 	executor_step(&exec, 0.0)
@@ -393,7 +390,7 @@ test_optional_sequence :: proc(t: ^testing.T) {
 	// Optional sequence should NOT stop on failure
 	node := optional_seq(
 		run(increment_action, &ctx),
-		run(proc(_: rawptr) -> bool {return false}), 	// Fail
+		run(proc() -> bool {return false}), 	// Fail
 		run(increment_action, &ctx),
 	)
 	enqueue_node(&exec, node)
@@ -401,7 +398,6 @@ test_optional_sequence :: proc(t: ^testing.T) {
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, ctx.action_count, 2)
 }
-*/
 
 @(test)
 test_semaphore_scope :: proc(t: ^testing.T) {
@@ -511,7 +507,7 @@ test_weak_guard :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	alive := true
-	is_valid :: proc(data: rawptr) -> bool { return (^bool)(data)^ }
+	is_valid :: proc(data: ^bool) -> bool { return data^ }
 
 	// Weak wraps an action. If 'alive' becomes false, Weak should abort child and fail.
 	node := seq(weak(wait(1.0), is_valid, &alive), run(complete_action, &ctx))
