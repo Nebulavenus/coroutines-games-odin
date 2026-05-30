@@ -902,7 +902,10 @@ diagnostics_notify_destroyed :: proc(exec: ^Executor, node: ^Node, depth: int) {
 
 // API Helpers
 
-_add_node :: proc(exec: ^Executor, name: string, data: Node_Data) -> Handle {
+_add_node :: proc(name: string, data: Node_Data, loc := #caller_location) -> Handle {
+	assert(context.user_ptr != nil, "Executor not found in context.user_ptr!", loc = loc)
+	exec := (^Executor)(context.user_ptr)
+
 	h, _ := hm.add(&exec.pool, Node{ name = name, data = data, handle = {} })
 	node, _ := hm.get(&exec.pool, h)
 	node.handle = h
@@ -910,8 +913,11 @@ _add_node :: proc(exec: ^Executor, name: string, data: Node_Data) -> Handle {
 	return h
 }
 
-_link_children :: proc(exec: ^Executor, parent: Handle, children: []Handle) {
+_link_children :: proc(parent: Handle, children: []Handle, loc := #caller_location) {
 	if len(children) == 0 do return
+	assert(context.user_ptr != nil, "Executor not found in context.user_ptr!", loc = loc)
+	exec := (^Executor)(context.user_ptr)
+
 	p_node, p_ok := hm.get(&exec.pool, parent)
 	if !p_ok do return
 
@@ -933,186 +939,194 @@ _link_children :: proc(exec: ^Executor, parent: Handle, children: []Handle) {
 
 // API
 
-seq :: proc(exec: ^Executor, nodes: ..Handle) -> Handle {
-	h := _add_node(exec, "Sequence", Sequence_Node{})
-	_link_children(exec, h, nodes)
+seq :: proc(nodes: ..Handle) -> Handle {
+	h := _add_node("Sequence", Sequence_Node{})
+	_link_children(h, nodes)
 	return h
 }
 
-select :: proc(exec: ^Executor, nodes: ..Handle) -> Handle {
-	h := _add_node(exec, "Select", Select_Node{})
-	_link_children(exec, h, nodes)
+select :: proc(nodes: ..Handle) -> Handle {
+	h := _add_node("Select", Select_Node{})
+	_link_children(h, nodes)
 	return h
 }
 
-sync :: proc(exec: ^Executor, nodes: ..Handle) -> Handle {
-	h := _add_node(exec, "Sync", Sync_Node{})
-	_link_children(exec, h, nodes)
+sync :: proc(nodes: ..Handle) -> Handle {
+	h := _add_node("Sync", Sync_Node{})
+	_link_children(h, nodes)
 	return h
 }
 
-race :: proc(exec: ^Executor, nodes: ..Handle) -> Handle {
-	h := _add_node(exec, "Race", Race_Node{})
-	_link_children(exec, h, nodes)
+race :: proc(nodes: ..Handle) -> Handle {
+	h := _add_node("Race", Race_Node{})
+	_link_children(h, nodes)
 	return h
 }
 
-wait :: proc(exec: ^Executor, duration: f32) -> Handle {
-	h := _add_node(exec, "Wait", Wait_Node{duration = duration})
+wait :: proc(duration: f32) -> Handle {
+	exec := (^Executor)(context.user_ptr)
+	h := _add_node("Wait", Wait_Node{duration = duration})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
 
-wait_ptr :: proc(exec: ^Executor, duration: ^f32) -> Handle {
-	h := _add_node(exec, "WaitPtr", Wait_Node{duration_ptr = duration})
+wait_ptr :: proc(duration: ^f32) -> Handle {
+	exec := (^Executor)(context.user_ptr)
+	h := _add_node("WaitPtr", Wait_Node{duration_ptr = duration})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
 
 
-run_typed :: proc(exec: ^Executor, callback: proc(payload: ^$T) -> bool, payload: ^T = nil) -> Handle {
+run_typed :: proc(callback: proc(payload: ^$T) -> bool, payload: ^T = nil) -> Handle {
 	thunk :: proc(cb: rawptr, p: rawptr) -> bool {
 		return (proc(payload: ^T) -> bool)(cb)((^T)(p))
 	}
-	return _add_node(exec, "Callback", Callback_Node{callback_ptr = rawptr(callback), payload = rawptr(payload), thunk = thunk})
+	return _add_node("Callback", Callback_Node{callback_ptr = rawptr(callback), payload = rawptr(payload), thunk = thunk})
 }
 
-run_nil :: proc(exec: ^Executor, callback: proc() -> bool) -> Handle {
+run_nil :: proc(callback: proc() -> bool) -> Handle {
 	thunk :: proc(cb: rawptr, p: rawptr) -> bool {
 		return (proc() -> bool)(cb)()
 	}
-	return _add_node(exec, "Callback", Callback_Node{callback_ptr = rawptr(callback), thunk = thunk})
+	return _add_node("Callback", Callback_Node{callback_ptr = rawptr(callback), thunk = thunk})
 }
 
 run :: proc {run_nil, run_typed}
 check :: run
 
-loop :: proc(exec: ^Executor, child: Handle) -> Handle {
-	h := _add_node(exec, "Loop", Loop_Node{})
+loop :: proc(child: Handle) -> Handle {
+	exec := (^Executor)(context.user_ptr)
+	h := _add_node("Loop", Loop_Node{})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
-	_link_children(exec, h, {child})
+	_link_children(h, {child})
 	return h
 }
 
-tween :: proc(exec: ^Executor, start, target, duration: f32, output: ^f32, ease: Ease_Proc = nil) -> Handle {
-	h := _add_node(exec, "Tween", Tween_Node{start_val = start, target_val = target, duration = duration, output = output, ease = ease})
+tween :: proc(start, target, duration: f32, output: ^f32, ease: Ease_Proc = nil) -> Handle {
+	exec := (^Executor)(context.user_ptr)
+	h := _add_node("Tween", Tween_Node{start_val = start, target_val = target, duration = duration, output = output, ease = ease})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
 
-wait_until_typed :: proc(exec: ^Executor, condition: proc(payload: ^$T) -> bool, payload: ^T = nil) -> Handle {
+wait_until_typed :: proc(condition: proc(payload: ^$T) -> bool, payload: ^T = nil) -> Handle {
+	exec := (^Executor)(context.user_ptr)
 	thunk :: proc(cb: rawptr, p: rawptr) -> bool {
 		return (proc(payload: ^T) -> bool)(cb)((^T)(p))
 	}
-	h := _add_node(exec, "WaitUntil", Condition_Node{condition_ptr = rawptr(condition), payload = rawptr(payload), thunk = thunk})
+	h := _add_node("WaitUntil", Condition_Node{condition_ptr = rawptr(condition), payload = rawptr(payload), thunk = thunk})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
 
-wait_until_nil :: proc(exec: ^Executor, condition: proc() -> bool) -> Handle {
+wait_until_nil :: proc(condition: proc() -> bool) -> Handle {
+	exec := (^Executor)(context.user_ptr)
 	thunk :: proc(cb: rawptr, p: rawptr) -> bool {
 		return (proc() -> bool)(cb)()
 	}
-	h := _add_node(exec, "WaitUntil", Condition_Node{condition_ptr = rawptr(condition), thunk = thunk})
+	h := _add_node("WaitUntil", Condition_Node{condition_ptr = rawptr(condition), thunk = thunk})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
 
 wait_until :: proc {wait_until_typed, wait_until_nil}
 
-scope_typed :: proc(exec: ^Executor, child: Handle, on_exit: proc(payload: ^$T, status: Status), payload: ^T = nil) -> Handle {
+scope_typed :: proc(child: Handle, on_exit: proc(payload: ^$T, status: Status), payload: ^T = nil) -> Handle {
 	thunk :: proc(cb: rawptr, p: rawptr, status: Status) {
 		(proc(payload: ^T, status: Status))(cb)((^T)(p), status)
 	}
-	h := _add_node(exec, "Scope", Scope_Node{on_exit_ptr = rawptr(on_exit), payload = rawptr(payload), thunk = thunk})
-	_link_children(exec, h, {child})
+	h := _add_node("Scope", Scope_Node{on_exit_ptr = rawptr(on_exit), payload = rawptr(payload), thunk = thunk})
+	_link_children(h, {child})
 	return h
 }
 
-scope_nil :: proc(exec: ^Executor, child: Handle, on_exit: proc(status: Status)) -> Handle {
+scope_nil :: proc(child: Handle, on_exit: proc(status: Status)) -> Handle {
 	thunk :: proc(cb: rawptr, p: rawptr, status: Status) {
 		(proc(status: Status))(cb)(status)
 	}
-	h := _add_node(exec, "Scope", Scope_Node{on_exit_ptr = rawptr(on_exit), thunk = thunk})
-	_link_children(exec, h, {child})
+	h := _add_node("Scope", Scope_Node{on_exit_ptr = rawptr(on_exit), thunk = thunk})
+	_link_children(h, {child})
 	return h
 }
 
 scope :: proc {scope_typed, scope_nil}
 
-not :: proc(exec: ^Executor, child: Handle) -> Handle {
-	h := _add_node(exec, "Not", Not_Node{})
-	_link_children(exec, h, {child})
+not :: proc(child: Handle) -> Handle {
+	h := _add_node("Not", Not_Node{})
+	_link_children(h, {child})
 	return h
 }
 
-catch :: proc(exec: ^Executor, child: Handle) -> Handle {
-	h := _add_node(exec, "Catch", Catch_Node{})
-	_link_children(exec, h, {child})
+catch :: proc(child: Handle) -> Handle {
+	h := _add_node("Catch", Catch_Node{})
+	_link_children(h, {child})
 	return h
 }
 
-managed :: proc(exec: ^Executor, child: Handle, payload: rawptr, allocator := context.allocator) -> Handle {
-	h := _add_node(exec, "Managed", Managed_Node{payload = payload, allocator = allocator})
-	_link_children(exec, h, {child})
+managed :: proc(child: Handle, payload: rawptr, allocator := context.allocator) -> Handle {
+	h := _add_node("Managed", Managed_Node{payload = payload, allocator = allocator})
+	_link_children(h, {child})
 	return h
 }
 
-wait_frames :: proc(exec: ^Executor, frames: int) -> Handle {
-	h := _add_node(exec, "WaitFrames", Wait_Frames_Node{target_frames = frames})
+wait_frames :: proc(frames: int) -> Handle {
+	exec := (^Executor)(context.user_ptr)
+	h := _add_node("WaitFrames", Wait_Frames_Node{target_frames = frames})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
 
-capture_return :: proc(exec: ^Executor, child: Handle, output_ptr: ^bool) -> Handle {
-	h := _add_node(exec, "CaptureReturn", Capture_Return_Node{output = output_ptr})
-	_link_children(exec, h, {child})
+capture_return :: proc(child: Handle, output_ptr: ^bool) -> Handle {
+	h := _add_node("CaptureReturn", Capture_Return_Node{output = output_ptr})
+	_link_children(h, {child})
 	return h
 }
 
-optional_seq :: proc(exec: ^Executor, nodes: ..Handle) -> Handle {
-	h := _add_node(exec, "OptionalSequence", Optional_Sequence_Node{})
-	_link_children(exec, h, nodes)
+optional_seq :: proc(nodes: ..Handle) -> Handle {
+	h := _add_node("OptionalSequence", Optional_Sequence_Node{})
+	_link_children(h, nodes)
 	return h
 }
 
-semaphore_scope :: proc(exec: ^Executor, sem: ^Semaphore, child: Handle) -> Handle {
-	h := _add_node(exec, "Semaphore", Semaphore_Handler_Node{sem = sem})
-	_link_children(exec, h, {child})
+semaphore_scope :: proc(sem: ^Semaphore, child: Handle) -> Handle {
+	h := _add_node("Semaphore", Semaphore_Handler_Node{sem = sem})
+	_link_children(h, {child})
 	return h
 }
 
-fork :: proc(exec: ^Executor, child: Handle) -> Handle {
-	h := _add_node(exec, "Fork", Fork_Node{})
-	_link_children(exec, h, {child})
+fork :: proc(child: Handle) -> Handle {
+	h := _add_node("Fork", Fork_Node{})
+	_link_children(h, {child})
 	return h
 }
 
-wait_forever :: proc(exec: ^Executor) -> Handle {
-	return _add_node(exec, "WaitForever", Wait_Forever_Node{})
+wait_forever :: proc() -> Handle {
+	return _add_node("WaitForever", Wait_Forever_Node{})
 }
 
-weak_typed :: proc(exec: ^Executor, child: Handle, is_valid: proc(payload: ^$T) -> bool, payload: ^T = nil) -> Handle {
+weak_typed :: proc(child: Handle, is_valid: proc(payload: ^$T) -> bool, payload: ^T = nil) -> Handle {
 	thunk :: proc(cb: rawptr, p: rawptr) -> bool {
 		return (proc(payload: ^T) -> bool)(cb)((^T)(p))
 	}
-	h := _add_node(exec, "Weak", Weak_Node{is_valid_ptr = rawptr(is_valid), payload = rawptr(payload), thunk = thunk})
-	_link_children(exec, h, {child})
+	h := _add_node("Weak", Weak_Node{is_valid_ptr = rawptr(is_valid), payload = rawptr(payload), thunk = thunk})
+	_link_children(h, {child})
 	return h
 }
 
-weak_nil :: proc(exec: ^Executor, child: Handle, is_valid: proc() -> bool) -> Handle {
+weak_nil :: proc(child: Handle, is_valid: proc() -> bool) -> Handle {
 	thunk :: proc(cb: rawptr, p: rawptr) -> bool {
 		return (proc() -> bool)(cb)()
 	}
-	h := _add_node(exec, "Weak", Weak_Node{is_valid_ptr = rawptr(is_valid), thunk = thunk})
-	_link_children(exec, h, {child})
+	h := _add_node("Weak", Weak_Node{is_valid_ptr = rawptr(is_valid), thunk = thunk})
+	_link_children(h, {child})
 	return h
 }
 
 weak :: proc {weak_typed, weak_nil}
 
-named :: proc(exec: ^Executor, h: Handle, name: string) -> Handle {
+named :: proc(h: Handle, name: string) -> Handle {
+	exec := (^Executor)(context.user_ptr)
 	if h.idx != 0 {
 		node, ok := hm.get(&exec.pool, h)
 		if ok do node.user_name = name

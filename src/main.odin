@@ -126,17 +126,17 @@ wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> Handle {
 		return find_enemy(p.game, p.id) != nil
 	}
 
-	exec := &game.exec
-	res := managed(exec, weak(exec,
-		seq(exec,
-			sync(exec,
-				run(exec, proc(p: ^Payload) -> bool {
+	context.user_ptr = &game.exec
+	res := managed(weak(
+		seq(
+			sync(
+				run(proc(p: ^Payload) -> bool {
 					if e := find_enemy(p.game, p.id); e != nil do e.telegraph_timer = 0.8
 					return true
 				}, p),
-				named(exec, wait(exec, 0.8), "Telegraph Timer")
+				named(wait(0.8), "Telegraph Timer")
 			),
-			named(exec, run(exec, proc(p: ^Payload) -> bool {
+			named(run(proc(p: ^Payload) -> bool {
 				e := find_enemy(p.game, p.id)
 				if e == nil do return true
 				dir := linalg.normalize(p.game.player.pos - e.pos)
@@ -153,7 +153,7 @@ wizard_attack_behavior :: proc(game: ^Game_World, enemy_id: int) -> Handle {
 				return true
 		}, p), "Shoot Fireball")), is_alive, p), p)
 
-	named(exec, res, "Wizard Attack")
+	named(res, "Wizard Attack")
 	return res
 }
 
@@ -171,19 +171,19 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> Handle {
 		return find_enemy(p.game, p.id) != nil
 	}
 
-	exec := &game.exec
-	res := managed(exec, weak(exec,
-		semaphore_scope(exec, &game.charge_semaphore, // only allows two elites to run this dash
-			named(exec, seq(exec,
-				named(exec, run(exec, proc(p: ^Payload) -> bool { // start charge
+	context.user_ptr = &game.exec
+	res := managed(weak(
+		semaphore_scope(&game.charge_semaphore, // only allows two elites to run this dash
+			named(seq(
+				named(run(proc(p: ^Payload) -> bool { // start charge
 					e := find_enemy(p.game, p.id)
 					if e == nil do return true
 					e.speed *= 3.5
 					e.is_charging = true
 					return true
 				}, p), "Start Dash"),
-				named(exec, wait(exec, 1.0), "Dash Duration"),
-				named(exec, run(exec, proc(p: ^Payload) -> bool { // stop it
+				named(wait(1.0), "Dash Duration"),
+				named(run(proc(p: ^Payload) -> bool { // stop it
 					e := find_enemy(p.game, p.id)
 					if e == nil do return true
 					e.speed /= 3.5
@@ -192,7 +192,7 @@ elite_charge_behavior :: proc(game: ^Game_World, enemy_id: int) -> Handle {
 			}, p), "End Dash")), "Elite Dash Sequence")
 		), is_alive, p), p)
 
-	named(exec, res, "Elite Charge Behavior")
+	named(res, "Elite Charge Behavior")
 	return res
 }
 
@@ -205,18 +205,18 @@ death_pop_behavior :: proc(game: ^Game_World, pos: [2]f32) -> Handle {
 
 	append(&game.pop_effects, p)
 
-	exec := &game.sys_exec
-	res := fork(exec,
-		named(exec, seq(exec,
-			named(exec, tween(exec, 0.0, 30.0, 0.8, &p.radius, ease_in_out_elastic), "Expand"),
-			named(exec, tween(exec, 30.0, 0.0, 0.4, &p.radius, ease_in_out_cubic), "Contract"),
-			run(exec, proc(p: ^Pop_Effect) -> bool {
+	context.user_ptr = &game.sys_exec
+	res := fork(
+		named(seq(
+			named(tween(0.0, 30.0, 0.8, &p.radius, ease_in_out_elastic), "Expand"),
+			named(tween(30.0, 0.0, 0.4, &p.radius, ease_in_out_cubic), "Contract"),
+			run(proc(p: ^Pop_Effect) -> bool {
 				p.ended = true
 				return true
 			}, p)
 		), "Pop Animation"))
 
-	named(exec, res, "Death Pop Behavior")
+	named(res, "Death Pop Behavior")
 	return res
 }
 
@@ -228,11 +228,11 @@ whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> Handle {
 	}
 
 	p := new(Weapon_Payload); p.game = game; p.weapon = weapon
-	exec := &game.exec
-	res := managed(exec, loop(exec,
-		named(exec, seq(exec,
-			named(exec, wait_ptr(exec, &weapon.cooldown), "Whip Cooldown"),
-			named(exec, run(exec, proc(p: ^Weapon_Payload) -> bool {
+	context.user_ptr = &game.exec
+	res := managed(loop(
+		named(seq(
+			named(wait_ptr(&weapon.cooldown), "Whip Cooldown"),
+			named(run(proc(p: ^Weapon_Payload) -> bool {
 				for &e in p.game.enemies {
 					if linalg.distance(e.pos, p.game.player.pos) < 110.0 do e.health -= p.weapon.damage
 				}
@@ -241,7 +241,7 @@ whip_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> Handle {
 			}, p), "Whip Slash")
 		), "Whip Cycle")), p)
 
-	named(exec, res, "Whip Weapon Behavior")
+	named(res, "Whip Weapon Behavior")
 	return res
 }
 
@@ -255,11 +255,11 @@ fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> Handle {
 	p := new(Weapon_Payload)
 	p.game = game
 	p.weapon = weapon
-	exec := &game.exec
-	res := managed(exec, loop(exec,
-		named(exec, seq(exec,
-			named(exec, wait_ptr(exec, &weapon.cooldown), "Fireball Cooldown"),
-			named(exec, run(exec, proc(p: ^Weapon_Payload) -> bool {
+	context.user_ptr = &game.exec
+	res := managed(loop(
+		named(seq(
+			named(wait_ptr(&weapon.cooldown), "Fireball Cooldown"),
+			named(run(proc(p: ^Weapon_Payload) -> bool {
 				if len(p.game.enemies) == 0 do return true
 				nearest := 0
 				min_d := f32(99999.0)
@@ -282,20 +282,20 @@ fireball_behavior :: proc(game: ^Game_World, weapon: ^Weapon) -> Handle {
 			}, p), "Launch Fireball")
 		), "Fireball Cycle")), p)
 
-	named(exec, res, "Fireball Weapon Behavior")
+	named(res, "Fireball Weapon Behavior")
 	return res
 }
 
 level_up_sequence :: proc(game: ^Game_World) -> Handle {
-	exec := &game.sys_exec
-	res := named(exec, seq(exec,
-		named(exec, run(exec, proc(g: ^Game_World) -> bool { // pause game
+	context.user_ptr = &game.sys_exec
+	res := named(seq(
+		named(run(proc(g: ^Game_World) -> bool { // pause game
 			g.is_paused = true
 			g.level_up_scale = 0
 			return true
 		}, game), "Pause Game"),
-		named(exec, tween(exec, 0.0, 1.0, 0.4, &game.level_up_scale, ease_in_out_cubic), "Show Shop UI"),
-		named(exec, wait_until(exec, proc(g: ^Game_World) -> bool { // until upgrade is not selected, waits here
+		named(tween(0.0, 1.0, 0.4, &game.level_up_scale, ease_in_out_cubic), "Show Shop UI"),
+		named(wait_until(proc(g: ^Game_World) -> bool { // until upgrade is not selected, waits here
 			if k2.key_went_down(.N1) {
 				for &w in g.player.weapons do w.cooldown *= 0.8
 				return true
@@ -312,8 +312,8 @@ level_up_sequence :: proc(game: ^Game_World) -> Handle {
 			}
 			return false
 		}, game), "Wait for Player Choice"),
-		named(exec, tween(exec, 1.0, 0.0, 0.2, &game.level_up_scale, ease_in_out_cubic), "Hide Shop UI"),
-		named(exec, run(exec, proc(g: ^Game_World) -> bool {
+		named(tween(1.0, 0.0, 0.2, &game.level_up_scale, ease_in_out_cubic), "Hide Shop UI"),
+		named(run(proc(g: ^Game_World) -> bool {
 			g.is_paused = false
 			return true
 		}, game), "Unpause Game")), "Level Up Sequence")
@@ -321,9 +321,9 @@ level_up_sequence :: proc(game: ^Game_World) -> Handle {
 }
 
 shield_behavior :: proc(game: ^Game_World, duration: f32) -> Handle {
-	exec := &game.exec
-	res := named(exec, seq(exec,
-		named(exec, run(exec,
+	context.user_ptr = &game.exec
+	res := named(seq(
+		named(run(
 			proc(g: ^Game_World) -> bool {
 				g.player.shield_active = true;
 				return true
@@ -331,11 +331,11 @@ shield_behavior :: proc(game: ^Game_World, duration: f32) -> Handle {
 			game,
 		), "Activate Shield"),
 		// Race against timer: Stay active until timer wins
-		named(exec, race(exec,
-			named(exec, wait(exec, duration), "Shield Timer"),
-			named(exec, wait_forever(exec), "Constant Shield")
+		named(race(
+			named(wait(duration), "Shield Timer"),
+			named(wait_forever(), "Constant Shield")
 		), "Shield Active State"),
-		named(exec, run(exec,
+		named(run(
 			proc(g: ^Game_World) -> bool {
 				g.player.shield_active = false;
 				return true
@@ -347,13 +347,13 @@ shield_behavior :: proc(game: ^Game_World, duration: f32) -> Handle {
 }
 
 super_attack_behavior :: proc(game: ^Game_World) -> Handle {
-	exec := &game.exec
-	res := named(exec, seq(exec,
-		named(exec, sync(exec,
-			named(exec, apply_camera_shake(exec, game, 15.0), "Shake Camera"),
-			named(exec, wait(exec, 0.5), "Charge Delay")
+	context.user_ptr = &game.exec
+	res := named(seq(
+		named(sync(
+			named(apply_camera_shake(game, 15.0), "Shake Camera"),
+			named(wait(0.5), "Charge Delay")
 		), "Charge Phase"),
-		named(exec, run(exec, proc(g: ^Game_World) -> bool {
+		named(run(proc(g: ^Game_World) -> bool {
 			for i in 0 ..< 12 {
 				a := f32(i) * math.PI / 6.0
 				append(
@@ -371,8 +371,8 @@ super_attack_behavior :: proc(game: ^Game_World) -> Handle {
 	return res
 }
 
-apply_camera_shake :: proc(exec: ^Executor, game: ^Game_World, amount: f32) -> Handle {
-	return named(exec, tween(exec, amount, 0.0, 0.4, &game.camera_shake), "Camera Shake")
+apply_camera_shake :: proc(game: ^Game_World, amount: f32) -> Handle {
+	return named(tween(amount, 0.0, 0.4, &game.camera_shake), "Camera Shake")
 }
 
 spawner_behavior :: proc(game: ^Game_World) -> Handle {
@@ -419,33 +419,40 @@ spawner_behavior :: proc(game: ^Game_World) -> Handle {
 		return &game.enemies[boss_idx]
 	}
 	exec := &game.exec
-	res := named(exec, loop(exec,
-		named(exec, seq(exec,
-			named(exec, select(exec,
-				named(exec, seq(exec,
-					named(exec, check(exec, proc(g: ^Game_World) -> bool {
+	context.user_ptr = exec
+	res := named(loop(
+		named(seq(
+			named(select(
+				named(seq(
+					named(check(proc(g: ^Game_World) -> bool {
 							return g.player.level > 0 && g.player.level % 2 == 0 && g.boss_spawned_at != g.player.level
 						}, game), "Check Boss Conditions"),
-					named(exec, run(exec, proc(g: ^Game_World) -> bool {
+					named(run(proc(g: ^Game_World) -> bool {
 							g.boss_spawned_at = g.player.level
 							g.boss_fight = true // lock spawning of mobs until boss is defeated
 							boss := spawn(g, .Boss)
-							enqueue_node(&g.sys_exec, apply_camera_shake(&g.sys_exec, g, 10.0))
-							enqueue_node(&g.exec, boss_ai_timeline(g, boss.boss_state))
+							{
+								context.user_ptr = &g.sys_exec
+								enqueue_node(&g.sys_exec, apply_camera_shake(g, 10.0))
+							}
+							{
+								context.user_ptr = &g.exec
+								enqueue_node(&g.exec, boss_ai_timeline(g, boss.boss_state))
+							}
 							return true
                         }, game), "Spawn Boss"),
-					named(exec, wait_until(exec, proc(g: ^Game_World) -> bool {
+					named(wait_until(proc(g: ^Game_World) -> bool {
 						return g.boss_fight == false
 					}, game), "Boss Fight Defeated?")
 				), "Boss Spawn Branch"),
-				named(exec, seq(exec,
-					named(exec, race(exec,
-						named(exec, wait(exec, 3.0), "Spawn Interval"),
-						named(exec, wait_until(exec, proc(g: ^Game_World) -> bool {
+				named(seq(
+					named(race(
+						named(wait(3.0), "Spawn Interval"),
+						named(wait_until(proc(g: ^Game_World) -> bool {
 							return g.player.health < 30
 						}, game), "Urgent Spawn Trigger")
 					), "Normal Wait"),
-					named(exec, run(exec, proc(g: ^Game_World) -> bool {
+					named(run(proc(g: ^Game_World) -> bool {
 						spawn(g, .Skeleton)
 						if rand.float32() < 0.4 do spawn(g, .Wizard)
 						if rand.float32() < 0.2 do spawn(g, .Elite_Skeleton)
@@ -464,36 +471,37 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> Handle {
 	}
 
 	exec := &game.exec
+	context.user_ptr = exec
 	p := new(Boss_AI_Payload, exec.allocator)
 	p.game = game
 	p.boss = boss
 
 	center_x := f32(W_WIDTH / 2)
 
-	return managed(exec, scope(exec,
-		seq(exec,
+	return managed(scope(
+		seq(
 			// phase 1 - attack loop,
-			race(exec,
+			race(
 				// trigger for phase 2, if boss hp is below 400
-				wait_until(exec, proc(p: ^Boss_AI_Payload) -> bool {
+				wait_until(proc(p: ^Boss_AI_Payload) -> bool {
 					e := find_enemy(p.game, p.boss.self_enemy_id)
 					return e != nil && e.health < 400
 				}, p),
 
 				// if hp is still above 400 hp, standard movement, and attack loops
-				sync(exec,
+				sync(
 					// horizontal slide loop
-					loop(exec, seq(exec,
-						tween(exec, center_x, center_x + 200.0, 3.0, &boss.pos_x, ease_in_out_cubic),
-						wait(exec, 0.5),
-						tween(exec, center_x + 200.0, center_x - 200.0, 6.0, &boss.pos_x, ease_in_out_cubic),
-						wait(exec, 0.5),
-						tween(exec, center_x - 200.0, center_x, 3.0, &boss.pos_x, ease_in_out_cubic),
+					loop(seq(
+						tween(center_x, center_x + 200.0, 3.0, &boss.pos_x, ease_in_out_cubic),
+						wait(0.5),
+						tween(center_x + 200.0, center_x - 200.0, 6.0, &boss.pos_x, ease_in_out_cubic),
+						wait(0.5),
+						tween(center_x - 200.0, center_x, 3.0, &boss.pos_x, ease_in_out_cubic),
 					)),
 					// firing lop
-					loop(exec, seq(exec,
-						wait(exec, 1.5),
-						run(exec, proc(p: ^Boss_AI_Payload) -> bool {
+					loop(seq(
+						wait(1.5),
+						run(proc(p: ^Boss_AI_Payload) -> bool {
 							e := find_enemy(p.game, p.boss.self_enemy_id)
 							if e == nil do return true
 
@@ -515,28 +523,27 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> Handle {
 				)
 			),
 			// phase 2 - transition shield charging in center
-			seq(exec,
+			seq(
 				// move boss to center
-				tween(exec, boss.pos_x, center_x, 1.0, &boss.pos_x, ease_in_out_cubic),
+				tween(boss.pos_x, center_x, 1.0, &boss.pos_x, ease_in_out_cubic),
 
-				scope(exec, seq(exec,
+				scope(seq(
 					// activate shield
-					run(exec, proc(p: ^Boss_AI_Payload) -> bool {
+					run(proc(p: ^Boss_AI_Payload) -> bool {
 						p.boss.shield_active = true
 						return true
 					}, p),
-					tween(exec, 0.0, 1.0, 0.5, &boss.shield_power),
+					tween(0.0, 1.0, 0.5, &boss.shield_power),
 					// shake screen, charge shield
-					sync(exec,
-						apply_camera_shake(exec, game, 15.0),
-						seq(exec,
-
-							tween(exec, 1.0, 1.6, 1.5, &boss.visual_scale, ease_in_out_elastic),
-							wait(exec, 0.5),
+					sync(
+						apply_camera_shake(game, 15.0),
+						seq(
+							tween(1.0, 1.6, 1.5, &boss.visual_scale, ease_in_out_elastic),
+							wait(0.5),
 						),
 					),
 					// trigger super explosion
-					run(exec, proc(p: ^Boss_AI_Payload) -> bool {
+					run(proc(p: ^Boss_AI_Payload) -> bool {
 						e := find_enemy(p.game, p.boss.self_enemy_id)
 						if e == nil do return true
 
@@ -564,12 +571,12 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> Handle {
 			),
 
 			// phase 3 - visually bigger and rapid fire
-			seq(exec,
-				tween(exec, boss.visual_scale, 1.3, 0.6, &boss.visual_scale, ease_in_out_cubic),
-				sync(exec,
-					loop(exec, seq(exec, // normal attacks
-						wait(exec, 0.6), // rapid firing rate
-						run(exec, proc(p: ^Boss_AI_Payload) -> bool {
+			seq(
+				tween(boss.visual_scale, 1.3, 0.6, &boss.visual_scale, ease_in_out_cubic),
+				sync(
+					loop(seq( // normal attacks
+						wait(0.6), // rapid firing rate
+						run(proc(p: ^Boss_AI_Payload) -> bool {
 							e := find_enemy(p.game, p.boss.self_enemy_id)
 							if e == nil do return true
 
@@ -586,9 +593,9 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> Handle {
 							return true
 						}, p)),
 					),
-					loop(exec, seq(exec, // sometimes rings
-						wait(exec, 4),
-						run(exec, proc(p: ^Boss_AI_Payload) -> bool {
+					loop(seq( // sometimes rings
+						wait(4),
+						run(proc(p: ^Boss_AI_Payload) -> bool {
 							e := find_enemy(p.game, p.boss.self_enemy_id)
 							if e == nil do return true
 
@@ -955,12 +962,14 @@ step :: proc() -> bool {
 			if dist < 15.0 && gw.player_damage_timer <= 0.0 && !gw.player.shield_active {
 				gw.player.health -= 10
 				gw.player_damage_timer = 0.5
-				enqueue_node(&gw.sys_exec, apply_camera_shake(&gw.sys_exec, gw, 6.0))
+				context.user_ptr = &gw.sys_exec
+				enqueue_node(&gw.sys_exec, apply_camera_shake(gw, 6.0))
 			}
 
 			// Death
 			if e.health <= 0 {
 				append(&gw.gems, e.pos)
+				context.user_ptr = &gw.sys_exec
 				enqueue_node(&gw.sys_exec, death_pop_behavior(gw, e.pos)) // Visual effect on death
 
 				// handle boss death
@@ -969,7 +978,8 @@ step :: proc() -> bool {
 						free(e.boss_state)
 					}
 					gw.boss_fight = false
-					enqueue_node(&gw.sys_exec, apply_camera_shake(&gw.sys_exec, gw, 20.0))
+					context.user_ptr = &gw.sys_exec
+					enqueue_node(&gw.sys_exec, apply_camera_shake(gw, 20.0))
 				}
 
 				unordered_remove(&gw.enemies, i)

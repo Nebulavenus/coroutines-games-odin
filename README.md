@@ -31,15 +31,15 @@ main :: proc() {
 
     // Construct a coroutine which executes tasks sequentially
     // wait 1.5s -> increase score -> apply tween 2s, to move player up
-    exec := &state.exec
-    my_task := seq(exec,
-        wait(exec, 1.5),
-        run(exec, proc(s: ^Game_State) -> bool {
+    context.user_ptr = &state.exec
+    my_task := seq(
+        wait(1.5),
+        run(proc(s: ^Game_State) -> bool {
             s.player_score += 100
             fmt.println("Score increased!")
             return true
         }, &state),
-        tween(exec, 0.0, 400.0, 2.0, &state.player_y, ease_in_out_cubic),
+        tween(0.0, 400.0, 2.0, &state.player_y, ease_in_out_cubic),
     )
 
     // Add coroutine to the scheduler
