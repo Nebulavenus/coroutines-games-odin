@@ -30,11 +30,6 @@ Node :: struct {
 	data:         Node_Data,
 }
 
-Node_Exec_Info :: struct {
-	handle: Handle,
-	status: Status,
-}
-
 Ease_Proc :: proc(t: f32) -> f32
 
 ease_linear :: proc(t: f32) -> f32 {
@@ -200,9 +195,8 @@ diagnostics_db_destroy :: proc(db: ^Diagnostics_DB) {
 
 Executor :: struct {
 	pool:              hm.Dynamic_Handle_Map(Node, Handle),
-	active_nodes:      [dynamic]Node_Exec_Info,
-	next_active_nodes: [dynamic]Node_Exec_Info,
-	suspended_nodes:   [dynamic]Node_Exec_Info,
+	active_nodes:      [dynamic]Handle,
+	next_active_nodes: [dynamic]Handle,
 	step_count:        int,
 	total_time:        f64,
 	allocator:         mem.Allocator,
@@ -212,42 +206,27 @@ Executor :: struct {
 executor_init :: proc(exec: ^Executor, allocator := context.allocator) {
 	exec.allocator = allocator
 	hm.dynamic_init(&exec.pool, allocator)
-	exec.active_nodes = make([dynamic]Node_Exec_Info, allocator)
-	exec.next_active_nodes = make([dynamic]Node_Exec_Info, allocator)
-	exec.suspended_nodes = make([dynamic]Node_Exec_Info, allocator)
+	exec.active_nodes = make([dynamic]Handle, allocator)
+	exec.next_active_nodes = make([dynamic]Handle, allocator)
 	exec.step_count = 0
 	exec.total_time = 0
 	exec.debugger = nil
 }
 
 executor_destroy :: proc(exec: ^Executor) {
-	for info in exec.active_nodes {
-		if info.handle.idx != 0 {
-			node, ok := hm.get(&exec.pool, info.handle)
-			if ok && node.parent.idx == 0 {
-				node_free(exec, info.handle)
-			}
+	roots := make([dynamic]Handle, context.temp_allocator)
+	it := hm.iterator_make(&exec.pool)
+	for node, h in hm.iterate(&it) {
+		if node.parent.idx == 0 {
+			append(&roots, h)
 		}
 	}
-	for info in exec.next_active_nodes {
-		if info.handle.idx != 0 {
-			node, ok := hm.get(&exec.pool, info.handle)
-			if ok && node.parent.idx == 0 {
-				node_free(exec, info.handle)
-			}
-		}
+	for h in roots {
+		node_free(exec, h)
 	}
-	for info in exec.suspended_nodes {
-		if info.handle.idx != 0 {
-			node, ok := hm.get(&exec.pool, info.handle)
-			if ok && node.parent.idx == 0 {
-				node_free(exec, info.handle)
-			}
-		}
-	}
+
 	delete(exec.active_nodes)
 	delete(exec.next_active_nodes)
-	delete(exec.suspended_nodes)
 	hm.dynamic_destroy(&exec.pool)
 }
 
@@ -296,17 +275,6 @@ node_free :: proc(exec: ^Executor, h: Handle, depth: int = 0) {
 		// No special cleanup
 	}
 
-	// Nullify in execution queues
-	for &info in exec.active_nodes {
-		if info.handle == h do info.handle = {}
-	}
-	for &info in exec.next_active_nodes {
-		if info.handle == h do info.handle = {}
-	}
-	for &info in exec.suspended_nodes {
-		if info.handle == h do info.handle = {}
-	}
-
 	hm.remove(&exec.pool, h)
 }
 
@@ -315,127 +283,80 @@ enqueue_node :: proc(exec: ^Executor, h: Handle, parent: Handle = {}) {
 	node, ok := hm.get(&exec.pool, h)
 	if !ok do return
 	node.parent = parent
-	append(&exec.active_nodes, Node_Exec_Info{handle = h, status = .None})
+	node.status = .None
+	append(&exec.active_nodes, h)
 }
 
 executor_step :: proc(exec: ^Executor, dt: f32) {
 	exec.total_time += f64(dt)
 
-	for i := len(exec.suspended_nodes) - 1; i >= 0; i -= 1 {
-		if exec.suspended_nodes[i].status == .Aborted {
-			node, ok := hm.get(&exec.pool, exec.suspended_nodes[i].handle)
-			if ok && node.parent.idx == 0 {
-				node_free(exec, exec.suspended_nodes[i].handle)
-			}
-			unordered_remove(&exec.suspended_nodes, i)
-		}
-	}
-
 	i := 0
 	for i < len(exec.active_nodes) {
-		info := exec.active_nodes[i]
+		h := exec.active_nodes[i]
 		i += 1
 
-		if info.handle.idx == 0 || info.status == .Aborted {
-			if info.handle.idx != 0 {
-				node, ok := hm.get(&exec.pool, info.handle)
-				if ok && node.parent.idx == 0 {
-					node_free(exec, info.handle)
-				}
-			}
-			continue
-		}
+		if h.idx == 0 do continue
 
-		node, ok := hm.get(&exec.pool, info.handle)
+		node, ok := hm.get(&exec.pool, h)
 		if !ok do continue
 
-		if info.status == .None {
-			info.status = node_start(exec, info.handle)
-			node.status = info.status
-
-			if info.status == .Suspended {
-				append(&exec.suspended_nodes, info)
-				continue
+		if node.status == .Aborted {
+			if node.parent.idx == 0 {
+				node_free(exec, h)
 			}
-			if info.status == .Completed || info.status == .Failed {
-				process_node_end(exec, &info, info.status)
-				continue
-			}
-		}
-
-		if info.status == .Running {
-			info.status = node_update(exec, info.handle, dt)
-			node.status = info.status
-
-			if info.status == .Suspended {
-				append(&exec.suspended_nodes, info)
-				continue
-			}
-			if info.status == .Completed || info.status == .Failed {
-				process_node_end(exec, &info, info.status)
-				continue
-			}
-
-			append(&exec.next_active_nodes, info)
-		}
-
-		if info.status == .Completed || info.status == .Failed {
-			process_node_end(exec, &info, info.status)
 			continue
 		}
+
+		if node.status == .None {
+			node.status = node_start(exec, h)
+
+			if node.status == .Completed || node.status == .Failed {
+				process_node_end(exec, h, node.status)
+				continue
+			}
+		}
+
+		if node.status == .Running {
+			node.status = node_update(exec, h, dt)
+
+			if node.status == .Completed || node.status == .Failed {
+				process_node_end(exec, h, node.status)
+				continue
+			}
+
+			if node.status == .Running {
+				append(&exec.next_active_nodes, h)
+			}
+		}
 	}
 
-	clear(&exec.active_nodes)
-	for info in exec.next_active_nodes {
-		append(&exec.active_nodes, info)
-	}
+	// O(1) Double-Buffered Swap
+	exec.active_nodes, exec.next_active_nodes = exec.next_active_nodes, exec.active_nodes
 	clear(&exec.next_active_nodes)
 	exec.step_count += 1
 }
 
-process_node_end :: proc(exec: ^Executor, info: ^Node_Exec_Info, status: Status) {
-	node, ok := hm.get(&exec.pool, info.handle)
+process_node_end :: proc(exec: ^Executor, h: Handle, status: Status) {
+	node, ok := hm.get(&exec.pool, h)
 	if !ok do return
 
-	node_end(exec, info.handle, status)
+	node_end(exec, h, status)
 	node.status = status
 
 	if node.parent.idx != 0 {
-		parent_status := node_on_child_stopped(exec, node.parent, info.handle, status)
-
-		for j := 0; j < len(exec.active_nodes); j += 1 {
-			if exec.active_nodes[j].handle == node.parent {
-				exec.active_nodes[j].status = parent_status
-			}
-		}
-
-		for j := len(exec.next_active_nodes) - 1; j >= 0; j -= 1 {
-			if exec.next_active_nodes[j].handle == node.parent {
-				if parent_status != .Running {
-					p := exec.next_active_nodes[j]
-					p.status = parent_status
-					append(&exec.active_nodes, p)
-					unordered_remove(&exec.next_active_nodes, j)
-				} else {
-					exec.next_active_nodes[j].status = parent_status
-				}
-			}
-		}
-
-		for j := len(exec.suspended_nodes) - 1; j >= 0; j -= 1 {
-			if exec.suspended_nodes[j].handle == node.parent {
-				if parent_status != .Suspended {
-					p := exec.suspended_nodes[j]
-					p.status = parent_status
-					append(&exec.active_nodes, p)
-					unordered_remove(&exec.suspended_nodes, j)
-				} else {
-					exec.suspended_nodes[j].status = parent_status
-				}
+		parent_status := node_on_child_stopped(exec, node.parent, h, status)
+		p_node, p_ok := hm.get(&exec.pool, node.parent)
+		if p_ok {
+			old_parent_status := p_node.status
+			p_node.status = parent_status
+			if parent_status == .Completed || parent_status == .Failed {
+				process_node_end(exec, node.parent, parent_status)
+			} else if parent_status == .Running && old_parent_status == .Suspended {
+				append(&exec.active_nodes, node.parent)
 			}
 		}
 	} else {
-		node_free(exec, info.handle)
+		node_free(exec, h)
 	}
 }
 
@@ -446,16 +367,6 @@ abort_node :: proc(exec: ^Executor, h: Handle) {
 
 	node_end(exec, h, .Aborted)
 	node.status = .Aborted
-
-	for &info in exec.active_nodes {
-		if info.handle == h do info.status = .Aborted
-	}
-	for &info in exec.next_active_nodes {
-		if info.handle == h do info.status = .Aborted
-	}
-	for &info in exec.suspended_nodes {
-		if info.handle == h do info.status = .Aborted
-	}
 }
 
 node_start :: proc(exec: ^Executor, h: Handle) -> Status {

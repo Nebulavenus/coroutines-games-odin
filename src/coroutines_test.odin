@@ -3,6 +3,7 @@ package main
 
 import "core:fmt"
 import "core:testing"
+import hm "core:container/handle_map"
 
 Test_Context :: struct {
 	action_count:  int,
@@ -541,4 +542,48 @@ test_weak_guard :: proc(t: ^testing.T) {
 	executor_step(&exec, 0.1)
 	// Sequence should have failed because Weak failed, so complete_action never runs.
 	testing.expect_value(t, ctx.was_completed, false)
+}
+
+@(test)
+test_suspended_status_behavior :: proc(t: ^testing.T) {
+	exec: Executor
+	executor_init(&exec)
+	context.user_ptr = &exec
+	defer executor_destroy(&exec)
+
+	// Sequence [ Wait(0.1) ]
+	// Sequence should be .Suspended while Wait is .Running
+	wait_h := wait(0.1)
+	seq_h := seq(wait_h)
+	enqueue_node(&exec, seq_h, {})
+
+	executor_step(&exec, 0.0)
+
+	// Check pool status
+	s_node, _ := hm.get(&exec.pool, seq_h)
+	w_node, _ := hm.get(&exec.pool, wait_h)
+	
+	testing.expect_value(t, s_node.status, Status.Suspended)
+	testing.expect_value(t, w_node.status, Status.Running)
+
+	// Check active queues
+	// seq_h should NOT be in active_nodes (it's suspended)
+	// wait_h SHOULD be in active_nodes
+	
+	found_seq := false
+	found_wait := false
+	for h in exec.active_nodes {
+		if h == seq_h do found_seq = true
+		if h == wait_h do found_wait = true
+	}
+	
+	testing.expect_value(t, found_seq, false)
+	testing.expect_value(t, found_wait, true)
+
+	// Step to finish Wait
+	executor_step(&exec, 0.11)
+	
+	// Now Sequence should be Completed and freed (since it's root)
+	_, ok := hm.get(&exec.pool, seq_h)
+	testing.expect_value(t, ok, false)
 }
