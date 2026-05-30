@@ -18,7 +18,8 @@ NvOptimusEnablement: c.ulong = 1
 @(export, link_name = "AmdPowerXpressRequestingHighPerformance")
 AmdPowerXpressRequestingHighPerformance: i32 = 1
 
-W_WIDTH, W_HEIGHT :: 1024, 768
+WW :: #force_inline proc() -> f32 { return f32(k2.get_screen_width()) }
+WH :: #force_inline proc() -> f32 { return f32(k2.get_screen_height()) }
 
 Enemy_Type :: enum {
 	Skeleton,
@@ -470,15 +471,18 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> Handle {
 		boss: ^Boss_State,
 	}
 
-	exec := &game.exec
-	context.user_ptr = exec
-	p := new(Boss_AI_Payload, exec.allocator)
+	context.user_ptr = &game.exec
+	p := new(Boss_AI_Payload)
 	p.game = game
 	p.boss = boss
 
-	center_x := f32(W_WIDTH / 2)
+	center_x := WW() / 2
 
-	return managed(scope(
+	is_alive :: proc(p: ^Boss_AI_Payload) -> bool {
+		return find_enemy(p.game, p.boss.self_enemy_id) != nil
+	}
+
+	return managed(weak(scope(
 		seq(
 			// phase 1 - attack loop,
 			race(
@@ -525,7 +529,7 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> Handle {
 			// phase 2 - transition shield charging in center
 			seq(
 				// move boss to center
-				tween(boss.pos_x, center_x, 1.0, &boss.pos_x, ease_in_out_cubic),
+				tween(&boss.pos_x, center_x, 1.0, &boss.pos_x, ease_in_out_cubic),
 
 				scope(seq(
 					// activate shield
@@ -619,12 +623,10 @@ boss_ai_timeline :: proc(game: ^Game_World, boss: ^Boss_State) -> Handle {
 		),
 		// global cleanup scope, reset visual scale, properties for boss state?
 		on_exit = proc(b: ^Boss_AI_Payload, status: Status) {
-			b.boss.visual_scale = 1.0
-			b.boss.shield_active = false
-			b.boss.shield_power = 0.0
+			free(b.boss)
 		},
 		payload = p,
-	), p)
+	), is_alive, p), p)
 }
 
 get_status_color :: proc(status: Status) -> k2.Color {
@@ -664,28 +666,28 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 	if !game.debug_visible do return
 
 	W_W :: 300
-	W_X :: W_WIDTH - W_W
+	W_X := WW() - W_W
 
 	k2.draw_rect(
-		k2.Rect{f32(W_X), 0, f32(W_W), f32(W_HEIGHT)},
+		k2.Rect{W_X, 0, f32(W_W), WH()},
 		k2.color_alpha(k2.BLACK, 216),
 	)
 	k2.draw_rect_outline(
-		k2.Rect{f32(W_X), 0, f32(W_W), f32(W_HEIGHT)},
+		k2.Rect{W_X, 0, f32(W_W), WH()},
 		1.0,
 		k2.RL_DARKGRAY,
 	)
 
 	y: i32 = 45
-	k2.draw_text("COROUTINE DEBUGGER", {f32(W_X + 10), 10}, 18, k2.RL_GOLD)
+	k2.draw_text("COROUTINE DEBUGGER", {W_X + 10, 10}, 18, k2.RL_GOLD)
 	k2.draw_text(
 		game.debug_compact ? "MODE: COMPACT (F2)" : "MODE: FULL (F2)",
-		{f32(W_X + 10), 26},
+		{W_X + 10, 26},
 		12,
 		k2.RL_GRAY,
 	)
 	if game.debug_paused {
-		k2.draw_text("PAUSED (F3)", {f32(W_X + 120), 26}, 12, k2.RL_MAROON)
+		k2.draw_text("PAUSED (F3)", {W_X + 120, 26}, 12, k2.RL_MAROON)
 	}
 
 	// Scrolling
@@ -707,7 +709,7 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 	if len(filter_str) > 0 {
 		k2.draw_text(
 			fmt.tprintf("FILTER: %s", filter_str),
-			{f32(W_X + 10), f32(W_HEIGHT - 20)},
+			{W_X + 10, WH() - 20},
 			12,
 			k2.RL_SKYBLUE,
 		)
@@ -742,7 +744,7 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 		if should_render {
 			if line_index^ >= game.debug_scroll {
 				color := get_status_color(node.status)
-				indent := i32(depth * 10)
+				indent := depth * 10
 				prefix := node.first_child.idx == 0 ? "  " : "v "
 				if node.status == Status.Suspended do prefix = "> "
 
@@ -769,8 +771,8 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 
 				text := fmt.tprintf("%s%s", prefix, display_name)
 
-				if y^ < W_HEIGHT - 30 {
-					k2.draw_text(text, {f32(W_WIDTH - 300 + 10 + indent), f32(y^)}, 12, color)
+				if y^ < i32(WH() - 30) {
+					k2.draw_text(text, {WW() - 300 + 10 + f32(indent), f32(y^)}, 12, color)
 					y^ += 12
 				}
 			}
@@ -808,7 +810,7 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 		if line_index >= game.debug_scroll {
 			alpha := 1.0 - f32(game.sys_exec.total_time - f.end_time) / 0.5
 			color := k2.color_alpha(get_status_color(f.status), u8(alpha * 255.0))
-			indent := i32(f.depth * 10)
+			indent := f.depth * 10
 			display_name := f.name
 			if len(f.user_name) > 0 {
 				display_name = fmt.tprintf("%s (%s)", f.user_name, f.name)
@@ -817,8 +819,8 @@ render_coroutine_debugger :: proc(game: ^Game_World) {
 			if len(f.info) > 0 {
 				text = fmt.tprintf("%s : %s", text, f.info)
 			}
-			if y < W_HEIGHT - 30 {
-				k2.draw_text(text, {f32(W_WIDTH - 300 + 10 + indent), f32(y)}, 12, color)
+			if y < i32(WH() - 30) {
+				k2.draw_text(text, {WW() - 300 + 10 + f32(indent), f32(y)}, 12, color)
 				y += 12
 			}
 		}
@@ -831,11 +833,11 @@ gw: ^Game_World
 
 init :: proc() {
 	// Init karl2d
-	k2.init(W_WIDTH, W_HEIGHT, "Game", {window_mode = .Windowed})
+	k2.init(1024, 768, "Game", {window_mode = .Windowed_Resizable})
 
 	// Init game
 	gw = new(Game_World)
-	gw.player.pos = {f32(W_WIDTH / 2), f32(W_HEIGHT / 2)}
+	gw.player.pos = {WW() / 2, WH() / 2}
 	gw.player.health = 100
 	gw.player.max_health = 100
 	gw.player.level = 1
@@ -876,9 +878,6 @@ shutdown :: proc() {
 	if gw == nil do return
 	for w in gw.player.weapons do free(w)
 	delete(gw.player.weapons)
-	for e in gw.enemies {
-		if e.boss_state != nil do free(e.boss_state)
-	}
 	delete(gw.enemies)
 	delete(gw.gems)
 	delete(gw.projectiles)
@@ -927,8 +926,8 @@ step :: proc() -> bool {
 		if linalg.length(p_dir) > 0 {
 			gw.player.pos += linalg.normalize(p_dir) * 200.0 * dt
 		}
-		gw.player.pos.x = math.clamp(gw.player.pos.x, 10, W_WIDTH - 10)
-		gw.player.pos.y = math.clamp(gw.player.pos.y, 10, W_HEIGHT - 10)
+		gw.player.pos.x = math.clamp(gw.player.pos.x, 10, WW() - 10)
+		gw.player.pos.y = math.clamp(gw.player.pos.y, 10, WH() - 10)
 
 		if k2.key_went_down(.Space) do enqueue_node(&gw.exec, super_attack_behavior(gw))
 
@@ -974,9 +973,6 @@ step :: proc() -> bool {
 
 				// handle boss death
 				if e.type == .Boss {
-					if e.boss_state != nil {
-						free(e.boss_state)
-					}
 					gw.boss_fight = false
 					context.user_ptr = &gw.sys_exec
 					enqueue_node(&gw.sys_exec, apply_camera_shake(gw, 20.0))
@@ -1009,9 +1005,9 @@ step :: proc() -> bool {
 
 			if hit ||
 			   p.pos.x < -50 ||
-			   p.pos.x > W_WIDTH + 50 ||
+			   p.pos.x > WW() + 50 ||
 			   p.pos.y < -50 ||
-			   p.pos.y > W_HEIGHT + 50 {
+			   p.pos.y > WH() + 50 {
 				unordered_remove(&gw.projectiles, i)
 			}
 		}
@@ -1146,21 +1142,21 @@ step :: proc() -> bool {
 	k2.draw_text(hud_str, {10, 10}, 20, k2.RL_WHITE)
 
 	enemies_str := fmt.tprintf("Active Enemies: %d", len(gw.enemies))
-	k2.draw_text(enemies_str, {f32(W_WIDTH - 200), 10}, 20, k2.RL_LIGHTGRAY)
-	k2.draw_text("SPACE: Super Attack", {10, f32(W_HEIGHT - 30)}, 20, k2.RL_DARKGRAY)
+	k2.draw_text(enemies_str, {WW() - 200, 10}, 20, k2.RL_LIGHTGRAY)
+	k2.draw_text("SPACE: Super Attack", {10, WH() - 30}, 20, k2.RL_DARKGRAY)
 
 	// Level Up Screen
 	if gw.is_paused {
 		k2.draw_rect(
-			k2.Rect{0, 0, f32(W_WIDTH), f32(W_HEIGHT)},
+			k2.Rect{0, 0, WW(), WH()},
 			k2.color_alpha(k2.BLACK, u8(0.8 * gw.level_up_scale * 255.0)),
 		)
-		y := f32(W_HEIGHT / 2 - 40) * gw.level_up_scale
-		k2.draw_text("LEVEL UP!", {f32(W_WIDTH / 2 - 80), y - 100}, 32, k2.RL_GOLD)
+		y := (WH() / 2 - 40) * gw.level_up_scale
+		k2.draw_text("LEVEL UP!", {WW() / 2 - 80, y - 100}, 32, k2.RL_GOLD)
 
 		opts := [3]string{"[1] SPEED", "[2] POWER", "[3] SHIELD"}
 		for s, i in opts {
-			rx := f32(W_WIDTH / 2 - 300 + i * 210)
+			rx := WW() / 2 - 300 + f32(i) * 210
 			k2.draw_rect(k2.Rect{rx, y, 180, 80}, k2.RL_DARKGRAY)
 			k2.draw_rect_outline(k2.Rect{rx, y, 180, 80}, 1.0, k2.RL_GOLD)
 			k2.draw_text(s, {rx + 30, y + 32}, 16, k2.RL_WHITE)
@@ -1169,12 +1165,12 @@ step :: proc() -> bool {
 
 	if gw.player.health <= 0 {
 		k2.draw_rect(
-			k2.Rect{0, 0, f32(W_WIDTH), f32(W_HEIGHT)},
+			k2.Rect{0, 0, WW(), WH()},
 			k2.color_alpha(k2.RL_MAROON, 178),
 		)
 		k2.draw_text(
 			"GAME OVER",
-			{f32(W_WIDTH / 2 - 100), f32(W_HEIGHT / 2 - 20)},
+			{WW() / 2 - 100, WH() / 2 - 20},
 			40,
 			k2.RL_WHITE,
 		)

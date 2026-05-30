@@ -15,6 +15,15 @@ Status :: enum {
 	Aborted,
 }
 
+Eval :: struct($T: typeid) {
+	val:  T,
+	ptr: ^T,
+}
+
+eval_get :: #force_inline proc "contextless" (e: Eval($T)) -> T {
+	return e.ptr != nil ? e.ptr^ : e.val
+}
+
 Handle :: hm.Handle32
 
 Node :: struct {
@@ -55,15 +64,21 @@ ease_in_out_elastic :: proc(t: f32) -> f32 {
 }
 
 Tween_Node :: struct {
-	start_val, target_val: f32,
-	duration, elapsed: 	   f32,
-	output:				   ^f32,
-    ease: 				   Ease_Proc,
+	start:    Eval(f32),
+	target:   Eval(f32),
+	duration: Eval(f32),
+	elapsed:  f32,
+    output:	  ^f32,
+    ease: 	  Ease_Proc,
+	// cached
+	resolved_start:    f32,
+	resolved_target:   f32,
+	resolved_duration: f32,
 }
 
 Wait_Node :: struct {
-	duration, elapsed: f32,
-	duration_ptr:      ^f32,
+	duration: Eval(f32),
+	elapsed:  f32,
 }
 
 Sequence_Node :: struct {
@@ -115,8 +130,10 @@ Catch_Node :: struct {
 }
 
 Wait_Frames_Node :: struct {
-	target_frames:  int,
+	target_frames:  Eval(int),
 	elapsed_frames: int,
+	// cached
+	resolved_target: int,
 }
 
 Capture_Return_Node :: struct {
@@ -376,7 +393,7 @@ node_start :: proc(exec: ^Executor, h: Handle) -> Status {
 	switch &v in node.data {
 	case Wait_Node:
 		v.elapsed = 0
-		dur := v.duration_ptr != nil ? v.duration_ptr^ : v.duration
+		dur := eval_get(v.duration)
 		return dur <= 0 ? .Completed : .Running
 	case Sequence_Node:
 		if node.first_child.idx == 0 do return .Completed
@@ -420,8 +437,12 @@ node_start :: proc(exec: ^Executor, h: Handle) -> Status {
 		return .Suspended
 	case Tween_Node:
 		v.elapsed = 0
-		v.output^ = v.start_val
-		return v.duration <= 0 ? .Completed : .Running
+		v.resolved_start = eval_get(v.start)
+		v.resolved_target = eval_get(v.target)
+		v.resolved_duration = eval_get(v.duration)
+
+		v.output^ = v.resolved_start
+		return v.resolved_duration <= 0 ? .Completed : .Running
 	case Condition_Node:
 		return .Running
 	case Scope_Node:
@@ -438,7 +459,8 @@ node_start :: proc(exec: ^Executor, h: Handle) -> Status {
 		return .Suspended
 	case Wait_Frames_Node:
 		v.elapsed_frames = 0
-		return v.target_frames <= 0 ? .Completed : .Running
+		v.resolved_target = eval_get(v.target_frames)
+		return v.resolved_target <= 0 ? .Completed : .Running
 	case Capture_Return_Node:
 		enqueue_node(exec, node.first_child, h)
 		return .Suspended
@@ -477,14 +499,14 @@ node_update :: proc(exec: ^Executor, h: Handle, dt: f32) -> Status {
 	#partial switch &v in node.data {
 	case Wait_Node:
 		v.elapsed += dt
-		dur := v.duration_ptr != nil ? v.duration_ptr^ : v.duration
+		dur := eval_get(v.duration)
 		return v.elapsed >= dur ? .Completed : .Running
 	case Tween_Node:
 		v.elapsed += dt
-		alpha := clamp(v.elapsed / v.duration, 0.0, 1.0)
+		alpha := clamp(v.elapsed / v.resolved_duration, 0.0, 1.0)
 		e_alpha := v.ease != nil ? v.ease(alpha) : alpha
-		v.output^ = v.start_val + (v.target_val - v.start_val) * e_alpha
-		return v.elapsed >= v.duration ? .Completed : .Running
+		v.output^ = v.resolved_start + (v.resolved_target - v.resolved_start) * e_alpha
+		return v.elapsed >= v.resolved_duration ? .Completed : .Running
 	case Condition_Node:
 		if v.thunk != nil {
 			return v.thunk(v.condition_ptr, v.payload) ? .Completed : .Running
@@ -501,7 +523,7 @@ node_update :: proc(exec: ^Executor, h: Handle, dt: f32) -> Status {
 		return .Running
 	case Wait_Frames_Node:
 		v.elapsed_frames += 1
-		return v.elapsed_frames >= v.target_frames ? .Completed : .Running
+		return v.elapsed_frames >= v.resolved_target ? .Completed : .Running
 	case Weak_Node:
 		if v.thunk != nil && !v.thunk(v.is_valid_ptr, v.payload) {
 			abort_node(exec, node.first_child)
@@ -731,7 +753,7 @@ node_get_debug_info :: proc(exec: ^Executor, h: Handle, buf: []byte) -> string {
 
 	#partial switch &v in node.data {
 	case Wait_Node:
-		dur := v.duration_ptr != nil ? v.duration_ptr^ : v.duration
+		dur := eval_get(v.duration)
 		return fmt.bprintf(buf, "%.2f/%.2f s", v.elapsed, dur)
 	case Sequence_Node:
 		total := 0
@@ -758,9 +780,9 @@ node_get_debug_info :: proc(exec: ^Executor, h: Handle, buf: []byte) -> string {
 		}
 		return fmt.bprintf(buf, "%d/%d", curr_idx, total)
 	case Tween_Node:
-		return fmt.bprintf(buf, "%.0f%%", (v.elapsed / v.duration) * 100.0)
+		return fmt.bprintf(buf, "%.0f%%", (v.elapsed / v.resolved_duration) * 100.0)
 	case Wait_Frames_Node:
-		return fmt.bprintf(buf, "%d/%d frames", v.elapsed_frames, v.target_frames)
+		return fmt.bprintf(buf, "%d/%d frames", v.elapsed_frames, v.resolved_target)
 	case Optional_Sequence_Node:
 		total := 0
 		curr_idx := 0
@@ -874,20 +896,21 @@ race :: proc(nodes: ..Handle) -> Handle {
 	return h
 }
 
-wait :: proc(duration: f32) -> Handle {
+wait_val :: proc(duration: f32) -> Handle {
 	exec := (^Executor)(context.user_ptr)
-	h := _add_node("Wait", Wait_Node{duration = duration})
+	h := _add_node("Wait", Wait_Node{duration = {val = duration}})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
 
 wait_ptr :: proc(duration: ^f32) -> Handle {
 	exec := (^Executor)(context.user_ptr)
-	h := _add_node("WaitPtr", Wait_Node{duration_ptr = duration})
+	h := _add_node("WaitPtr", Wait_Node{duration = {ptr = duration}})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
 
+wait :: proc {wait_val, wait_ptr}
 
 run_typed :: proc(callback: proc(payload: ^$T) -> bool, payload: ^T = nil) -> Handle {
 	thunk :: proc(cb: rawptr, p: rawptr) -> bool {
@@ -914,12 +937,21 @@ loop :: proc(child: Handle) -> Handle {
 	return h
 }
 
-tween :: proc(start, target, duration: f32, output: ^f32, ease: Ease_Proc = nil) -> Handle {
+tween_val :: proc(start, target, duration: f32, output: ^f32, ease: Ease_Proc = nil) -> Handle {
 	exec := (^Executor)(context.user_ptr)
-	h := _add_node("Tween", Tween_Node{start_val = start, target_val = target, duration = duration, output = output, ease = ease})
+	h := _add_node("Tween", Tween_Node{start = {val = start}, target = {val = target}, duration = {val = duration}, output = output, ease = ease})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
+
+tween_ptr :: proc(start_ptr: ^f32, target: f32, duration: f32, output: ^f32, ease: Ease_Proc = nil) -> Handle {
+	exec := (^Executor)(context.user_ptr)
+	h := _add_node("TweenPtr", Tween_Node{start = {ptr = start_ptr}, target = {val = target}, duration = {val = duration}, output = output, ease = ease})
+	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
+	return h
+}
+
+tween :: proc {tween_val, tween_ptr}
 
 wait_until_typed :: proc(condition: proc(payload: ^$T) -> bool, payload: ^T = nil) -> Handle {
 	exec := (^Executor)(context.user_ptr)
@@ -983,7 +1015,7 @@ managed :: proc(child: Handle, payload: rawptr, allocator := context.allocator) 
 
 wait_frames :: proc(frames: int) -> Handle {
 	exec := (^Executor)(context.user_ptr)
-	h := _add_node("WaitFrames", Wait_Frames_Node{target_frames = frames})
+	h := _add_node("WaitFrames", Wait_Frames_Node{target_frames = {val = frames}})
 	if node, ok := hm.get(&exec.pool, h); ok do node.show_age = true
 	return h
 }
