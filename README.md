@@ -31,23 +31,24 @@ main :: proc() {
 
     // Construct a coroutine which executes tasks sequentially
     // wait 1.5s -> increase score -> apply tween 2s, to move player up
-    my_task := seq(
-        wait(1.5),
-        run(proc(s: ^Game_State) -> bool {
+    exec := &state.exec
+    my_task := seq(exec,
+        wait(exec, 1.5),
+        run(exec, proc(s: ^Game_State) -> bool {
             s.player_score += 100
             fmt.println("Score increased!")
             return true
         }, &state),
-        tween(0.0, 400.0, 2.0, &state.player_y, ease_in_out_cubic),
+        tween(exec, 0.0, 400.0, 2.0, &state.player_y, ease_in_out_cubic),
     )
 
     // Add coroutine to the scheduler
-    enqueue_node(&state.exec, my_task)
+    enqueue_node(exec, my_task)
   
     // Step the executor in your main loop
     dt: f32 = 1.0 / 60.0 // or k2.get_frame_time()
     for step in 0..120 {
-      executor_step(&state.exec, dt)
+      executor_step(exec, dt)
     }
 }
 ```
@@ -79,7 +80,6 @@ The library provides three core types of execution nodes: **Composites** (contro
 *   **`scope(child, on_exit, payload)`**: Executes a guaranteed cleanup callback when the scope is terminated (via completion, failure, or abortion).
 *   **`weak(child, is_valid, payload)`**: Monitors target validity every frame. Instantly aborts the child and fails if the target is invalidated.
 *   **`managed(child, payload)`**: Pairs a node with its dynamic payload allocation, automatically freeing the payload memory when the node is destroyed.
-*   **`managed_run(callback, payload)`**: Shorthand wrapper combining `managed` and `run`.
 *   **`capture_return(child, bool_ptr)`**: Captures the success outcome of its child and writes it to a boolean pointer.
 *   **`semaphore_scope(semaphore, child)`**: Limits concurrent access to the child node based on available semaphore locks.
 *   **`not(child)`**: Negates success/failure states of the child.

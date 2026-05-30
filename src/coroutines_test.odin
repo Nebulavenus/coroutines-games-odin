@@ -43,8 +43,8 @@ test_wait_and_callback_sequence :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	// Seq: incr -> wait 0.1s -> completed
-	node := seq(run(increment_action, &ctx), wait(0.10), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, run(&exec, increment_action, &ctx), wait(&exec, 0.10), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, ctx.action_count, 1)
@@ -67,8 +67,8 @@ test_selector_fallback :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	// Select: Try to Fail -> Then Fallback to Complete
-	node := select(run(fail_action, &ctx), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := select(&exec, run(&exec, fail_action, &ctx), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 
@@ -87,8 +87,8 @@ test_parallel_race :: proc(t: ^testing.T) {
 
 	// Race: Fast wait vs Slow wait
 	// If fast wait wins, slow wait is aborted and the complete action triggers
-	node := seq(race(wait(0.05), wait(1.00)), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, race(&exec, wait(&exec, 0.05), wait(&exec, 1.00)), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	// 0.02s elapsed. No winner yet.
 	executor_step(&exec, 0.02)
@@ -109,8 +109,8 @@ test_parallel_sync :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	// Sync: Wait 0.05s AND Wait 0.20s
-	node := seq(sync(wait(0.05), wait(0.20)), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, sync(&exec, wait(&exec, 0.05), wait(&exec, 0.20)), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	// Step past the first timer limit (0.05s)
 	executor_step(&exec, 0.10)
@@ -136,8 +136,8 @@ test_loop_termination_on_failure :: proc(t: ^testing.T) {
 		return c.action_count < 3 // Return false (fail) on the 3rd step to terminate loop
 	}
 
-	node := loop(run(looping_counter_action, &ctx))
-	enqueue_node(&exec, node)
+	node := loop(&exec, run(&exec, looping_counter_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0) // Frame 1: count = 1, returns true (running)
 	testing.expect_value(t, ctx.action_count, 1)
@@ -167,8 +167,8 @@ test_scope_cleanup :: proc(t: ^testing.T) {
 	}
 
 	// Scope wraps a wait node. When wait completes, cleanup runs with .Completed
-	node := scope(wait(0.10), cleanup_callback, &ctx)
-	enqueue_node(&exec, node)
+	node := scope(&exec, wait(&exec, 0.10), cleanup_callback, &ctx)
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.05)
 	testing.expect_value(t, ctx.cleanup_val, Status.None) // Not finished yet
@@ -190,8 +190,8 @@ test_scope_cleanup_on_abort :: proc(t: ^testing.T) {
 		c.cleanup_val = status
 	}
 
-	node := scope(wait(1.00), cleanup_callback, &ctx)
-	enqueue_node(&exec, node)
+	node := scope(&exec, wait(&exec, 1.00), cleanup_callback, &ctx)
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.05)
 
@@ -207,8 +207,8 @@ test_tween_interpolation :: proc(t: ^testing.T) {
 	defer executor_destroy(&exec)
 
 	val: f32 = 0.0
-	node := tween(0.0, 10.0, 1.0, &val)
-	enqueue_node(&exec, node)
+	node := tween(&exec, 0.0, 10.0, 1.0, &val)
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect(t, val == 0.0, "Expected initial value to be 0.0")
@@ -234,8 +234,8 @@ test_wait_until :: proc(t: ^testing.T) {
 		return data^
 	}
 
-	node := seq(wait_until(check_condition, &condition_met), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, wait_until(&exec, check_condition, &condition_met), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, ctx.was_completed, false)
@@ -255,8 +255,8 @@ test_catch_node :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	// Catch a failure, turning it into a success for the sequence
-	node := seq(catch(run(fail_action, &ctx)), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, catch(&exec, run(&exec, fail_action, &ctx)), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, ctx.was_failed, true)
@@ -273,8 +273,8 @@ test_logical_decorators :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	// Decorate a failure action with NOT, converting it to Success
-	node := seq(not(run(fail_action, &ctx)), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, not(&exec, run(&exec, fail_action, &ctx)), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, ctx.was_failed, true) // Failure action was executed
@@ -287,7 +287,7 @@ test_nested_aborts :: proc(t: ^testing.T) {
 	executor_init(&exec)
 	defer executor_destroy(&exec)
 
-	ctx: Test_Context
+    ctx: Test_Context
 	reset_context(&ctx)
 
 	cleanup_callback :: proc(c: ^Test_Context, status: Status) {
@@ -296,11 +296,11 @@ test_nested_aborts :: proc(t: ^testing.T) {
 
 	// Seq [ Scope [ Wait ] ]
 	// Aborting Seq should abort Scope, which should abort Wait and run cleanup.
-	inner_wait := wait(10.0)
-	scoped := scope(inner_wait, cleanup_callback, &ctx)
-	root_seq := seq(scoped)
+	inner_wait := wait(&exec, 10.0)
+	scoped := scope(&exec, inner_wait, cleanup_callback, &ctx)
+	root_seq := seq(&exec, scoped)
 
-	enqueue_node(&exec, root_seq)
+	enqueue_node(&exec, root_seq, {})
 	executor_step(&exec, 0.1)
 
 	testing.expect_value(t, ctx.cleanup_val, Status.None)
@@ -323,8 +323,8 @@ test_wait_until_with_zero_dt :: proc(t: ^testing.T) {
 		return data^
 	}
 
-	node := seq(wait_until(check_cond, &condition), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, wait_until(&exec, check_cond, &condition), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	// Step with zero dt (paused simulation)
 	executor_step(&exec, 0.0)
@@ -344,8 +344,8 @@ test_wait_frames :: proc(t: ^testing.T) {
 	ctx: Test_Context
 	reset_context(&ctx)
 
-	node := seq(wait_frames(3), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, wait_frames(&exec, 3), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0) // Frame 1
 	testing.expect_value(t, ctx.was_completed, false)
@@ -364,15 +364,15 @@ test_capture_return :: proc(t: ^testing.T) {
 	defer executor_destroy(&exec)
 
 	res: bool
-	node := capture_return(run(proc() -> bool {return false}), &res)
-	enqueue_node(&exec, node)
+	node := capture_return(&exec, run(&exec, proc() -> bool {return false}), &res)
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, res, false)
 
 	res = false
-	node2 := capture_return(run(proc() -> bool {return true}), &res)
-	enqueue_node(&exec, node2)
+	node2 := capture_return(&exec, run(&exec, proc() -> bool {return true}), &res)
+	enqueue_node(&exec, node2, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, res, true)
@@ -388,12 +388,12 @@ test_optional_sequence :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	// Optional sequence should NOT stop on failure
-	node := optional_seq(
-		run(increment_action, &ctx),
-		run(proc() -> bool {return false}), 	// Fail
-		run(increment_action, &ctx),
+	node := optional_seq(&exec,
+		run(&exec, increment_action, &ctx),
+		run(&exec, proc() -> bool {return false}), 	// Fail
+		run(&exec, increment_action, &ctx),
 	)
-	enqueue_node(&exec, node)
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, ctx.action_count, 2)
@@ -414,11 +414,11 @@ test_semaphore_scope :: proc(t: ^testing.T) {
 	reset_context(&ctx2)
 
 	// Two nodes trying to enter a semaphore with max_active=1
-	node1 := semaphore_scope(&sem, seq(wait(0.1), run(complete_action, &ctx1)))
-	node2 := semaphore_scope(&sem, run(complete_action, &ctx2))
+	node1 := semaphore_scope(&exec, &sem, seq(&exec, wait(&exec, 0.1), run(&exec, complete_action, &ctx1)))
+	node2 := semaphore_scope(&exec, &sem, run(&exec, complete_action, &ctx2))
 
-	enqueue_node(&exec, node1)
-	enqueue_node(&exec, node2)
+	enqueue_node(&exec, node1, {})
+	enqueue_node(&exec, node2, {})
 
 	executor_step(&exec, 0.0)
 	// node1 acquired, node2 is queued
@@ -443,8 +443,8 @@ test_managed_node :: proc(t: ^testing.T) {
 	payload^ = 42
 
 	// Wrap in a managed node
-	node := managed(wait(1.0), payload)
-	enqueue_node(&exec, node)
+	node := managed(&exec, wait(&exec, 1.0), payload)
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.1)
 
@@ -463,11 +463,11 @@ test_fork :: proc(t: ^testing.T) {
 
 	// Seq [ Fork [ Seq [ Wait, Incr ] ], Complete ]
 	// Parent branch finishes instantly after Fork. Detached branch runs in background.
-	node := seq(
-		fork(seq(wait(0.1), run(increment_action, &ctx))),
-		run(complete_action, &ctx),
+	node := seq(&exec,
+		fork(&exec, seq(&exec, wait(&exec, 0.1), run(&exec, increment_action, &ctx))),
+		run(&exec, complete_action, &ctx),
 	)
-	enqueue_node(&exec, node)
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.0)
 	testing.expect_value(t, ctx.was_completed, true) // Parent branch done
@@ -487,8 +487,8 @@ test_wait_forever :: proc(t: ^testing.T) {
 	reset_context(&ctx)
 
 	// Race: 0.1s wait vs Forever. 0.1s should always win.
-	node := seq(race(wait(0.1), wait_forever()), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, race(&exec, wait(&exec, 0.1), wait_forever(&exec)), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.05)
 	testing.expect_value(t, ctx.was_completed, false)
@@ -510,8 +510,8 @@ test_weak_guard :: proc(t: ^testing.T) {
 	is_valid :: proc(data: ^bool) -> bool { return data^ }
 
 	// Weak wraps an action. If 'alive' becomes false, Weak should abort child and fail.
-	node := seq(weak(wait(1.0), is_valid, &alive), run(complete_action, &ctx))
-	enqueue_node(&exec, node)
+	node := seq(&exec, weak(&exec, wait(&exec, 1.0), is_valid, &alive), run(&exec, complete_action, &ctx))
+	enqueue_node(&exec, node, {})
 
 	executor_step(&exec, 0.1)
 	testing.expect_value(t, ctx.was_completed, false)
